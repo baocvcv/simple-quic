@@ -77,7 +77,7 @@ int main() {
     spdlog::warn("start client.");
 
     struct sockaddr_in addrTo {
-        AF_INET, 13556, {inet_addr("192.168.0.3")}, { 0 }
+        AF_INET, 13556, {inet_addr("127.0.0.1")}, { 0 }
     };
 
     PingPongClient client(addrTo, 3);
