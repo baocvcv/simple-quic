@@ -26,25 +26,69 @@ class QUIC {
 
     QUIC(PeerType type, uint16_t port);
 
-
-    int CloseConnection(uint64_t sequence, const std::string& reason,
+    /*
+     * Close a connection immediately
+     * @param descriptor: descriptor of the connection to be closed
+     * @param reason: a message sent to the peer explaining why connection is closed
+     * @param errorCode: error code sent to the peer
+     * @return: error code
+     * */
+    int CloseConnection(uint64_t descriptor, const std::string& reason,
                         uint64_t errorCode);
 
-    int SetConnectionCloseCallback(uint64_t sequence,
+    /*
+     * Set the callback when a connection is closed by the peer
+     * @param descriptor: descriptor of the target connection
+     * @param callback: callback function
+     * @return error code
+     * */
+    int SetConnectionCloseCallback(uint64_t descriptor,
                                    ConnectionCloseCallbackType callback);
 
-    uint64_t CreateStream(uint64_t sequence, bool bidirectional);
+    /*
+     * Create a new stream
+     * @param descriptor: descriptor of the target connection
+     * @param whether the stream is unidirectional
+     * @return stream ID of the created stream
+     * */
+    uint64_t CreateStream(uint64_t descriptor, bool bidirectional);
 
-    uint64_t CloseStream(uint64_t sequence, uint64_t streamID);
+    /* End a stream, send all pending data and mark the stream as FIN
+     * @param descriptor: descriptor of the target connection
+     * @param streamID of the target stream
+     * @return errorCode
+     * */
+    int CloseStream(uint64_t descriptor, uint64_t streamID);
 
-    uint64_t SendData(uint64_t sequence, uint64_t streamID,
+    /* send data to the peer in a certain stream
+     * @param descriptor: descriptor of the target connection
+     * @param streamID: streamID of the target stream
+     * @param buf: the sending buffer
+     * @param len: length of the sending buffer
+     * @param FIN: whether the stream ends after sending the buffer
+     * @return errorCode
+     * */
+    int SendData(uint64_t descriptor, uint64_t streamID,
                       std::unique_ptr<uint8_t[]> buf, size_t len,
                       bool FIN = false);
 
-    int SetStreamReadyCallback(uint64_t sequence,
+    /*
+     * set the callback function when a new stream arrives for a certain connection
+     * @param descriptor: descriptor of the target connection
+     * @param callback: callback function
+     * @return errorCode
+     * */
+    int SetStreamReadyCallback(uint64_t descriptor,
                                StreamReadyCallbackType callback);
 
-    int SetStreamDataReadyCallback(uint64_t sequence, uint64_t streamID,
+    /*
+     * set the callback function invoked when receives application data
+     * @param descriptor: descriptor of the target connection
+     * @param descriptor: stream ID of the target stream
+     * @param callback: callback function
+     * @return errorCode
+     * */
+    int SetStreamDataReadyCallback(uint64_t descriptor, uint64_t streamID,
                                    StreamDataReadyCallbackType callback);
 
     int SocketLoop();
@@ -67,6 +111,11 @@ class QUICServer : public QUIC {
    public:
     explicit QUICServer(uint16_t port);
 
+    /*
+     * Set the callback when server receives a new connection
+     * @param callback: callback when the connection is ready
+     * @return: error code
+     * */
     int SetConnectionReadyCallback(ConnectionReadyCallbackType callback);
 
    private:
@@ -77,6 +126,12 @@ class QUICClient : public QUIC {
    public:
     QUICClient();
 
+    /*
+     * create a new connection
+     * @param addrTo: target network address (ip and port)
+     * @param callback: callback when the connection is ready
+     * @return: descriptor of the created connection
+     * */
     uint64_t CreateConnection(struct sockaddr_in& addrTo,
                               const ConnectionReadyCallbackType& callback);
 };

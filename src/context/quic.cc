@@ -15,12 +15,12 @@ QUIC::QUIC(PeerType type, uint16_t port) : type(type), socket(port) {
     utils::logger::warn("create a QUIC server context");
 }
 
-int QUIC::CloseConnection([[maybe_unused]] uint64_t sequence,[[maybe_unused]] const std::string& reason,
+int QUIC::CloseConnection([[maybe_unused]] uint64_t descriptor,[[maybe_unused]] const std::string& reason,
                         [[maybe_unused]] uint64_t errorCode) {
     return 0;
 }
 
-int QUIC::SetConnectionCloseCallback([[maybe_unused]] uint64_t sequence,
+int QUIC::SetConnectionCloseCallback([[maybe_unused]] uint64_t descriptor,
                                      [[maybe_unused]] ConnectionCloseCallbackType callback) {
     return 0;
 }
@@ -34,26 +34,26 @@ uint64_t QUICClient::CreateConnection([[maybe_unused]] struct sockaddr_in& addrT
     return 0;
 }
 
-uint64_t QUIC::CreateStream([[maybe_unused]] uint64_t sequence, [[maybe_unused]] bool bidirectional) {
+uint64_t QUIC::CreateStream([[maybe_unused]] uint64_t descriptor, [[maybe_unused]] bool bidirectional) {
     return 0;
 }
 
-uint64_t QUIC::CloseStream([[maybe_unused]] uint64_t sequence, [[maybe_unused]] uint64_t streamID) {
+int QUIC::CloseStream([[maybe_unused]] uint64_t descriptor, [[maybe_unused]] uint64_t streamID) {
     return 0;
 }
 
-uint64_t QUIC::SendData([[maybe_unused]] uint64_t sequence, [[maybe_unused]] uint64_t streamID,
+int QUIC::SendData([[maybe_unused]] uint64_t descriptor, [[maybe_unused]] uint64_t streamID,
                   [[maybe_unused]] std::unique_ptr<uint8_t[]> buf, [[maybe_unused]] size_t len,
                   [[maybe_unused]] bool FIN) {
     return 0;
 }
 
-int QUIC::SetStreamReadyCallback([[maybe_unused]] uint64_t sequence,
+int QUIC::SetStreamReadyCallback([[maybe_unused]] uint64_t descriptor,
                            [[maybe_unused]] StreamReadyCallbackType callback) {
     return 0;
 }
 
-int QUIC::SetStreamDataReadyCallback([[maybe_unused]] uint64_t sequence, [[maybe_unused]] uint64_t streamID,
+int QUIC::SetStreamDataReadyCallback([[maybe_unused]] uint64_t descriptor, [[maybe_unused]] uint64_t streamID,
                                [[maybe_unused]] StreamDataReadyCallbackType callback) {
     return 0;
 }
