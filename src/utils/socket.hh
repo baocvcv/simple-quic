@@ -35,8 +35,8 @@ class UDPDatagram {
    public:
     UDPDatagram();
 
-    UDPDatagram(utils::ByteStream& stream, const struct sockaddr_in& srcAddr,
-                const struct sockaddr_in& dstAddr, uint8_t ecn);
+    UDPDatagram(utils::ByteStream& stream, struct sockaddr_in srcAddr,
+                struct sockaddr_in dstAddr, uint8_t ecn);
 
     int parseCMsg();
 
@@ -81,7 +81,6 @@ class UDPDatagram {
 class UDPSocket {
    public:
     UDPSocket(int localPort = 0);
-    ;
 
     ~UDPSocket();
 

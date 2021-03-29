@@ -3,12 +3,11 @@
 
 #include <chrono>
 
-namespace thquic {
-namespace utils {
+namespace thquic::utils {
 using clock = std::chrono::steady_clock;
 using timepoint = clock::time_point;
+using duration = clock::duration;
 using namespace std::chrono_literals;
-}  // namespace utils
-}  // namespace thquic
+}  // namespace thquic::utils
 
 #endif

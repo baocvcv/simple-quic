@@ -175,17 +175,17 @@ uint64_t decodeVarInt(ByteStream& stream) {
                      << static_cast<uint64_t>(8 * (decodeSize - 6));
             value |= static_cast<uint64_t>(buf[4])
                      << static_cast<uint64_t>(8 * (decodeSize - 5));
-            __attribute__((fallthrough));
+            [[fallthrough]];
         case 2:
             value |= static_cast<uint64_t>(buf[3])
                      << static_cast<uint64_t>(8 * (decodeSize - 4));
             value |= static_cast<uint64_t>(buf[2])
                      << static_cast<uint64_t>(8 * (decodeSize - 3));
-            __attribute__((fallthrough));
+            [[fallthrough]];
         case 1:
             value |= static_cast<uint64_t>(buf[1])
                      << static_cast<uint64_t>(8 * (decodeSize - 2));
-            __attribute__((fallthrough));
+            [[fallthrough]];
         case 0:
             value |= static_cast<uint64_t>(buf[0])
                      << static_cast<uint64_t>(8 * (decodeSize - 1));
@@ -196,17 +196,11 @@ uint64_t decodeVarInt(ByteStream& stream) {
     return value;
 }
 
-int encodeBuffer(ByteStream& stream, const std::unique_ptr<uint8_t[]> buf,
+int encodeBuffer(ByteStream& stream, const std::unique_ptr<uint8_t[]>& buf,
                  size_t len) {
     auto dstBuf = stream.Consume(len);
     std::copy(buf.get(), buf.get() + len, dstBuf.first);
     return 0;
-}
-
-template <std::size_t SIZE>
-void encodeBuffer(ByteStream& stream, std::array<int, SIZE>& buf) {
-    auto dstBuf = stream.Consume(SIZE);
-    std::copy(std::cbegin(buf), std::cend(buf), dstBuf.first);
 }
 
 std::unique_ptr<uint8_t[]> decodeBuffer(ByteStream& stream, size_t len) {

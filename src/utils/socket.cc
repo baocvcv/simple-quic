@@ -28,8 +28,8 @@ UDPDatagram::UDPDatagram()
     this->CMsgLen = 0;
 }
 
-UDPDatagram::UDPDatagram(ByteStream& stream, const struct sockaddr_in& srcAddr,
-                         const struct sockaddr_in& dstAddr, uint8_t ecn)
+UDPDatagram::UDPDatagram(ByteStream& stream, struct sockaddr_in srcAddr,
+                         struct sockaddr_in dstAddr, uint8_t ecn)
     : buffer(stream.FetchBuffer()),
       bufferSize(stream.GetBufferLen()),
       CMsgBuffer{},

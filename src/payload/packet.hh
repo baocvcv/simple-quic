@@ -62,6 +62,7 @@ class Header : public Serialization {
     }
 
     virtual PacketType Type() const = 0;
+    virtual uint64_t GetPktNum() const = 0;
     virtual const ConnectionID& GetDstID() const = 0;
     virtual bool IsFrameAllowed(FrameType type) const = 0;
 };
@@ -105,6 +106,30 @@ class Payload : public Serialization {
     int AttachFrame(std::shared_ptr<payload::Frame> frame) {
         frames.emplace_back(frame);
         return 0;
+    }
+
+    bool IsACKEliciting() const {
+        return std::find_if(
+                   frames.cbegin(), frames.cend(),
+                   [](const std::shared_ptr<payload::Frame>& f) {
+                       return (f->Type() != payload::FrameType::ACK) &&
+                              (f->Type() !=
+                               payload::FrameType::CONNECTION_CLOSE) &&
+                              (f->Type() != payload::FrameType::PADDING);
+                   }) != frames.cend();
+    }
+
+    utils::IntervalSet CollectACKRange() const {
+        utils::IntervalSet set;
+        for (const auto& frame : frames) {
+            if (frame->Type() == FrameType::ACK) {
+                set.AddIntervalSet(
+                    std::dynamic_pointer_cast<payload::ACKFrame>(frame)
+                        ->GetACKRanges());
+            }
+        }
+
+        return set;
     }
 
    protected:
@@ -159,6 +184,8 @@ class ShortHeader : public Header {
     PacketType Type() const override { return PacketType::ONE_RTT; }
 
     const ConnectionID& GetDstID() const override { return this->dstConnID; }
+
+    virtual uint64_t GetPktNum() const override { return this->pktNum; }
 
     bool IsFrameAllowed([[maybe_unused]] FrameType type) const override {
         return true;
@@ -261,6 +288,8 @@ class LongHeader : public Header {
 
     const ConnectionID& GetDstID() const final { return this->dstConnID; }
 
+    virtual uint64_t GetPktNum() const = 0;
+
     virtual size_t PayloadLen() const = 0;
 
    protected:
@@ -307,7 +336,8 @@ class Initial : public LongHeader {
         this->LongHeader::Encode(stream);
         utils::encodeVarInt(stream, this->tokenLength);
         auto buf = stream.Consume(this->tokenLength).first;
-        std::copy(std::cbegin(this->token), std::cbegin(this->token) + this->tokenLength, buf);
+        std::copy(std::cbegin(this->token),
+                  std::cbegin(this->token) + this->tokenLength, buf);
         utils::encodeVarInt(stream, this->length);
         utils::encodeUInt(stream, this->pktNum, this->pktNumLen + 1);
         return 0;
@@ -320,6 +350,8 @@ class Initial : public LongHeader {
     }
 
     PacketType Type() const override { return PacketType::INITIAL; }
+
+    uint64_t GetPktNum() const override { return this->pktNum; }
 
     size_t PayloadLen() const override {
         return this->length - (this->pktNumLen + 1);
@@ -376,6 +408,8 @@ class Handshake : public LongHeader {
         return this->length - (this->pktNumLen + 1);
     }
 
+    uint64_t GetPktNum() const override { return this->pktNum; }
+
     bool IsFrameAllowed(FrameType type) const override {
         return type == FrameType::PADDING || type == FrameType::PING ||
                type == FrameType::ACK || type == FrameType::CRYPTO;
@@ -418,6 +452,8 @@ class ZeroRTT : public LongHeader {
     size_t PayloadLen() const override {
         return this->length - (this->pktNumLen + 1);
     }
+
+    uint64_t GetPktNum() const override { return this->pktNum; }
 
     bool IsFrameAllowed(FrameType type) const override {
         return type != FrameType::ACK && type != FrameType::CRYPTO &&
@@ -470,6 +506,11 @@ class Retry : public LongHeader {
 
     size_t PayloadLen() const override { return 0; }
 
+    // In fact, retry has no Packet Number, so we always return zero.
+    // TODO: maybe throw a exception to warn the caller not to get the packet
+    // number of a Retry packet.
+    uint64_t GetPktNum() const override { return 0; }
+
     bool IsFrameAllowed([[maybe_unused]] FrameType type) const override {
         return false;
     }
@@ -490,8 +531,8 @@ class Packet : Serialization {
           addrDst(addrDst) {}
 
     Packet(utils::ByteStream& stream, const struct sockaddr_in& addrSrc,
-           const struct sockaddr_in& addrDst)
-        : addrSrc(addrSrc), addrDst(addrDst) {
+           const struct sockaddr_in& addrDst, utils::timepoint timepoint)
+        : addrSrc(addrSrc), addrDst(addrDst), recvTimestamp{timepoint} {
         this->header = Header::Parse(stream);
         switch (this->header->Type()) {
             case PacketType::INITIAL:
@@ -523,6 +564,8 @@ class Packet : Serialization {
                (this->payload ? this->payload->EncodeLen() : 0);
     }
 
+    uint64_t GetPktNum() const { return header->GetPktNum(); }
+
     const ConnectionID& GetDstConnID() const { return header->GetDstID(); }
 
     std::shared_ptr<Header> GetPktHeader() { return this->header; }
@@ -533,6 +576,14 @@ class Packet : Serialization {
 
     const struct sockaddr_in& GetAddrDst() const { return this->addrDst; }
 
+    void MarkSendTimestamp(utils::timepoint sendTime) {
+        this->sendTimestamp = sendTime;
+    }
+
+    utils::timepoint GetSendTimestamp() const { return this->sendTimestamp; }
+
+    utils::timepoint GetRecvTimestamp() const { return this->recvTimestamp; }
+
     PacketType GetPacketType() const { return this->header->Type(); }
 
     int AttachFrames(std::shared_ptr<Frame> frame) {
@@ -540,11 +591,23 @@ class Packet : Serialization {
         return 0;
     }
 
+    bool IsACKEliciting() const {
+        return this->payload && this->payload->IsACKEliciting();
+    }
+
+    utils::IntervalSet CollectACKRange() const {
+        return this->payload->CollectACKRange();
+    }
+
    private:
     std::shared_ptr<Header> header;
     std::shared_ptr<Payload> payload;
+
     struct sockaddr_in addrSrc;
     struct sockaddr_in addrDst;
+
+    utils::timepoint sendTimestamp;
+    utils::timepoint recvTimestamp;
 };
 
 }  // namespace thquic::payload

@@ -20,6 +20,8 @@ class ByteStream {
 
     ByteStream(const ByteStream& other) = delete;
 
+    ByteStream(ByteStream&& stream) = default;
+
     std::pair<uint8_t*, uint8_t*> Consume(size_t n) {
         this->CheckFree(n);
         auto range = std::make_pair<uint8_t*, uint8_t*>(buffer.get() + pos,
@@ -52,10 +54,12 @@ class ByteStream {
 
     size_t Pos() const { return this->pos; }
 
+    void Reset() { this->pos = 0; }
+
    private:
     std::unique_ptr<uint8_t[]> buffer;
-    size_t len;
-    size_t pos;
+    size_t len{};
+    size_t pos{};
 };
 
 }  // namespace thquic::utils

@@ -18,10 +18,14 @@ size_t encodeVarIntLen(uint64_t value);
 int encodeVarInt(ByteStream& stream, uint64_t value);
 uint64_t decodeVarInt(ByteStream& stream);
 
-int encodeBuffer(ByteStream& stream, const std::unique_ptr<uint8_t[]> buf,
+int encodeBuffer(ByteStream& stream, const std::unique_ptr<uint8_t[]>& buf,
                  size_t len);
+
 template <std::size_t SIZE>
-void encodeBuffer(ByteStream& stream, std::array<int, SIZE>& buf);
+void encodeBuffer(ByteStream& stream, std::array<int, SIZE>& buf) {
+    auto dstBuf = stream.Consume(SIZE);
+    std::copy(std::cbegin(buf), std::cend(buf), dstBuf.first);
+}
 
 std::unique_ptr<uint8_t[]> decodeBuffer(ByteStream& stream, size_t len);
 

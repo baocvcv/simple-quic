@@ -26,6 +26,11 @@ class RandomByteGenerator {
         return 0;
     }
 
+    uint64_t GetRandom(uint64_t minimum, uint64_t maximum) {
+        std::uniform_int_distribution dist{minimum, maximum};
+        return dist(this->rnd);
+    }
+
    private:
     RandomByteGenerator();
     std::mt19937 rnd;

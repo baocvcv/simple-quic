@@ -34,8 +34,10 @@
 #include <list>
 #include <memory>
 
+#include "context/connection_id.hh"
 #include "payload/common.hh"
 #include "utils/bytestream.hh"
+#include "utils/interval.hh"
 #include "utils/variable_codec.hh"
 
 namespace thquic::payload {
@@ -172,6 +174,7 @@ class Frame : public Serialization {
     }
     virtual uint8_t ID() const = 0;
     virtual FrameType Type() const = 0;
+    virtual const char* Name() const = 0;
 };
 
 // RESET_STREAM / STOP_SENDING / STREAM / MAX_STREAM_DATA / STREAM_DATA_BLOCKED
@@ -194,6 +197,8 @@ class PaddingFrame : public Frame {
     uint8_t ID() const override { return 0x00; };
 
     FrameType Type() const override { return FrameType::PADDING; }
+
+    const char* Name() const override { return "PADDING"; }
 
     int Encode(utils::ByteStream& stream) override {
         auto buf = stream.Consume(len).first;
@@ -220,6 +225,8 @@ class PingFrame : public Frame {
 
     FrameType Type() const override { return FrameType::PING; }
 
+    const char* Name() const override { return "PING"; }
+
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
         return 0;
@@ -228,30 +235,32 @@ class PingFrame : public Frame {
     size_t EncodeLen() const override { return 1; }
 };
 
+// we don't use gap, range pair as specified in the RFC in protocol processing
+// and only transform lazily when encoding.
 class ACKFrame : public Frame {
    public:
-    typedef struct ACKRange {
-        uint64_t gap;
-        uint64_t ACKRange;
-    } ACKRange;
-
-    ACKFrame(uint64_t largest, uint64_t ACKDelay, uint64_t firstACKRange)
-        : largestACKed{largest},
-          ACKDelay{ACKDelay},
-          ACKRangeCount{0},
-          firstACKRange{firstACKRange} {}
+    ACKFrame(uint64_t ACKDelay, utils::IntervalSet ACKRange)
+        : ACKDelay{ACKDelay}, ACKRange{ACKRange} {}
 
     explicit ACKFrame(utils::ByteStream& stream) {
         auto ID = utils::decodeVarInt(stream);
         assert(ID == this->ID());
-        this->largestACKed = utils::decodeVarInt(stream);
+        uint64_t largestACKed = utils::decodeVarInt(stream);
         this->ACKDelay = utils::decodeVarInt(stream);
-        this->ACKRangeCount = utils::decodeVarInt(stream);
-        this->firstACKRange = utils::decodeVarInt(stream);
-        for (unsigned i = 0; i < this->ACKRangeCount; i++) {
-            auto gap = utils::decodeVarInt(stream);
-            auto ACKRange = utils::decodeVarInt(stream);
-            this->ACKRanges.push_back({gap, ACKRange});
+        uint64_t ACKRangeCount = utils::decodeVarInt(stream);
+
+        uint64_t firstACKRange = utils::decodeVarInt(stream);
+        uint64_t smallestACKed = largestACKed - firstACKRange;
+
+        this->ACKRange.AddInterval(smallestACKed, largestACKed);
+
+        for (unsigned i = 0; i < ACKRangeCount; i++) {
+            uint64_t gap = utils::decodeVarInt(stream);
+            uint64_t range = utils::decodeVarInt(stream);
+
+            largestACKed = smallestACKed - gap - 2;
+            smallestACKed = largestACKed - range;
+            this->ACKRange.AddInterval(smallestACKed, largestACKed);
         }
     }
 
@@ -259,15 +268,24 @@ class ACKFrame : public Frame {
 
     FrameType Type() const override { return FrameType::ACK; }
 
+    const char* Name() const override { return "ACK"; }
+
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
-        utils::encodeVarInt(stream, this->largestACKed);
-        utils::encodeVarInt(stream, this->ACKDelay);
-        utils::encodeVarInt(stream, this->ACKRangeCount);
-        utils::encodeVarInt(stream, this->firstACKRange);
-        for (auto& range : this->ACKRanges) {
-            utils::encodeVarInt(stream, range.gap);
-            utils::encodeVarInt(stream, range.ACKRange);
+        if (ACKRange.Intervals().size() > 0) {
+            auto iter = ACKRange.Intervals().cbegin();
+            utils::encodeVarInt(stream, iter->End());
+            utils::encodeVarInt(stream, this->ACKDelay);
+            utils::encodeVarInt(stream, ACKRange.Intervals().size() - 1);
+            utils::encodeVarInt(stream, iter->End() - iter->Start());
+            iter++;
+            while (iter != ACKRange.Intervals().cend()) {
+                uint64_t gap = std::prev(iter)->Start() - iter->End() - 2;
+                uint64_t range = iter->End() - iter->Start();
+                utils::encodeVarInt(stream, gap);
+                utils::encodeVarInt(stream, range);
+                iter++;
+            }
         }
         return 0;
     }
@@ -275,36 +293,40 @@ class ACKFrame : public Frame {
     size_t EncodeLen() const override {
         size_t len = 0;
         len += utils::encodeVarIntLen(this->ID());
-        len += utils::encodeVarIntLen(this->largestACKed);
-        len += utils::encodeVarIntLen(this->ACKDelay);
-        len += utils::encodeVarIntLen(this->ACKRangeCount);
-        len += utils::encodeVarIntLen(this->firstACKRange);
-        for (auto& range : this->ACKRanges) {
-            len += utils::encodeVarIntLen(range.gap);
-            len += utils::encodeVarIntLen(range.ACKRange);
+        if (ACKRange.Intervals().size() > 0) {
+            auto iter = ACKRange.Intervals().cbegin();
+
+            len += utils::encodeVarIntLen(iter->End());
+            len += utils::encodeVarIntLen(this->ACKDelay);
+            len += utils::encodeVarIntLen(ACKRange.Intervals().size() - 1);
+            len += utils::encodeVarIntLen(iter->End() - iter->Start());
+
+            iter++;
+            while (iter != ACKRange.Intervals().cend()) {
+                uint64_t gap = std::prev(iter)->Start() - iter->End() - 2;
+                uint64_t range = iter->End() - iter->Start();
+
+                len += utils::encodeVarIntLen(gap);
+                len += utils::encodeVarIntLen(range);
+
+                iter++;
+            }
         }
+
         return len;
     }
 
-    void AddACKRange(uint64_t gap, uint64_t length) {
-        this->ACKRanges.emplace_back(ACKRange{gap, length});
-        this->ACKRangeCount = this->ACKRanges.size();
+    uint64_t GetLargestACKed() const {
+        return this->ACKRange.Intervals().front().End();
     }
-
-    uint64_t GetLargestACKed() const { return this->largestACKed; }
 
     uint64_t GetACKDelay() const { return this->ACKDelay; }
 
-    uint64_t GetfirstACKRange() const { return this->firstACKRange; }
-
-    const std::list<ACKRange>& GetACKRanges() const { return this->ACKRanges; }
+    const utils::IntervalSet& GetACKRanges() const { return this->ACKRange; }
 
    private:
-    uint64_t largestACKed;
     uint64_t ACKDelay;
-    uint64_t ACKRangeCount;
-    uint64_t firstACKRange;
-    std::list<ACKRange> ACKRanges;
+    utils::IntervalSet ACKRange;
 };
 
 class ACKECNFrame : public ACKFrame {
@@ -315,9 +337,9 @@ class ACKECNFrame : public ACKFrame {
         uint64_t ECTCECount;
     };
 
-    ACKECNFrame(uint64_t largest, uint64_t ACKDelay, uint64_t firstACKRange,
+    ACKECNFrame(uint64_t ACKDelay, utils::IntervalSet ACKRange,
                 uint64_t ECT0Count, uint64_t ECT1Count, uint64_t ECTCECount)
-        : ACKFrame(largest, ACKDelay, firstACKRange),
+        : ACKFrame(ACKDelay, ACKRange),
           ECNCount{ECT0Count, ECT1Count, ECTCECount} {}
 
     explicit ACKECNFrame(utils::ByteStream& stream) : ACKFrame(stream) {
@@ -347,6 +369,8 @@ class ACKECNFrame : public ACKFrame {
 
     FrameType Type() const override { return FrameType::ACK; }
 
+    const char* Name() const override { return "ACK"; }
+
     uint64_t GetECT0Count() const { return this->ECNCount.ECT0Count; }
 
     uint64_t GetECT1Count() const { return this->ECNCount.ECT1Count; }
@@ -372,6 +396,8 @@ class ResetStreamFrame : public StreamSpecificFrame {
     uint8_t ID() const override { return 0x04; }
 
     FrameType Type() const override { return FrameType::RESET_STREAM; }
+
+    const char* Name() const override { return "RESET_STREAM"; }
 
     uint64_t StreamID() const override { return this->streamID; }
 
@@ -416,6 +442,8 @@ class StopSendingFrame : public StreamSpecificFrame {
 
     FrameType Type() const override { return FrameType::STOP_SENDING; }
 
+    const char* Name() const override { return "STOP_SENDING"; }
+
     uint64_t StreamID() const override { return this->streamID; }
 
     int Encode(utils::ByteStream& stream) override {
@@ -457,6 +485,8 @@ class CryptoFrame : public Frame {
     uint8_t ID() const override { return 0x06; }
 
     FrameType Type() const override { return FrameType::CRYPTO; }
+
+    const char* Name() const override { return "CRYPTO"; }
 
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
@@ -506,6 +536,8 @@ class NewTokenFrame : public Frame {
     uint8_t ID() const override { return 0x07; }
 
     FrameType Type() const override { return FrameType::NEW_TOKEN; }
+
+    const char* Name() const override { return "NEW_TOKEN"; }
 
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
@@ -621,6 +653,8 @@ class StreamFrame : public StreamSpecificFrame {
 
     FrameType Type() const override { return FrameType::STREAM; }
 
+    const char* Name() const override { return "STREAM"; }
+
     uint64_t StreamID() const override { return this->streamID; }
 
     std::unique_ptr<uint8_t[]> FetchBuffer() {
@@ -673,6 +707,8 @@ class MaxDataFrame : public Frame {
 
     FrameType Type() const override { return FrameType::MAX_DATA; }
 
+    const char* Name() const override { return "MAX_DATA"; }
+
     uint64_t GetMaximumData() const { return this->maximumData; }
 
    private:
@@ -710,6 +746,8 @@ class MaxStreamDataFrame : public StreamSpecificFrame {
 
     FrameType Type() const override { return FrameType::MAX_STREAM_DATA; }
 
+    const char* Name() const override { return "MAX_STREAM_DATA"; }
+
     uint64_t StreamID() const override { return this->streamID; }
 
     uint64_t GetMaximumStreamData() const { return this->maximumStreamData; }
@@ -733,6 +771,8 @@ class MaxStreamsFrame : public Frame {
     uint8_t ID() const override { return 0x12 & this->unidirectional; }
 
     FrameType Type() const override { return FrameType::MAX_STREAMS; }
+
+    const char* Name() const override { return "MAX_STREAMS"; }
 
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
@@ -770,6 +810,8 @@ class DataBlockedFrame : public Frame {
 
     FrameType Type() const override { return FrameType::DATA_BLOCKED; }
 
+    const char* Name() const override { return "DATA_BLOCKED"; }
+
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
         utils::encodeVarInt(stream, this->maximumData);
@@ -804,6 +846,8 @@ class StreamDataBlockedFrame : public StreamSpecificFrame {
     uint8_t ID() const override { return 0x15; }
 
     FrameType Type() const override { return FrameType::STREAM_DATA_BLOCKED; }
+
+    const char* Name() const override { return "STREAM_DATA_BLOCKED"; }
 
     uint64_t StreamID() const override { return this->streamID; }
 
@@ -844,6 +888,8 @@ class StreamsBlockedFrame : public Frame {
     uint8_t ID() const override { return 0x16 & this->unidirectional; };
 
     FrameType Type() const override { return FrameType::STREAMS_BLOCKED; }
+
+    const char* Name() const override { return "STREAMS_BLOCKED"; }
 
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
@@ -888,6 +934,8 @@ class NewConnectionIDFrame : public Frame {
     uint8_t ID() const override { return 0x18; }
 
     FrameType Type() const override { return FrameType::NEW_CONNECTION_ID; }
+
+    const char* Name() const override { return "NEW_CONNECTION_ID"; }
 
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
@@ -948,6 +996,8 @@ class RetireConnectionIDFrame : public Frame {
         return 0;
     }
 
+    const char* Name() const override { return "RETIRE_CONNECTION_ID"; }
+
     size_t EncodeLen() const override {
         size_t len = 0;
         len += utils::encodeVarIntLen(this->ID());
@@ -971,7 +1021,11 @@ class PathChallengeFrame : public Frame {
         this->data = utils::decodeUint(stream, sizeof(uint64_t));
     }
     uint8_t ID() const override { return 0x1a; }
+
     FrameType Type() const override { return FrameType::PATH_CHALLENGE; }
+
+    const char* Name() const override { return "PATH_CHALLENGE"; }
+
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
         utils::encodeUInt(stream, this->data, sizeof(uint64_t));
@@ -1003,6 +1057,8 @@ class PathResponseFrame : public Frame {
     uint8_t ID() const override { return 0x1b; }
 
     FrameType Type() const override { return FrameType::PATH_RESPONSE; }
+
+    const char* Name() const override { return "PATH_RESPONSE"; }
 
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
@@ -1049,6 +1105,8 @@ class ConnectionCloseQUICFrame : public Frame {
     uint8_t ID() const override { return 0x1c; }
 
     FrameType Type() const override { return FrameType::CONNECTION_CLOSE; }
+
+    const char* Name() const override { return "CONNECTION_CLOSE"; }
 
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
@@ -1112,6 +1170,8 @@ class ConnectionCloseAppFrame : public Frame {
 
     FrameType Type() const override { return FrameType::CONNECTION_CLOSE; }
 
+    const char* Name() const override { return "CONNECTION_CLOSE"; }
+
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
         utils::encodeVarInt(stream, this->errorCode);
@@ -1153,7 +1213,11 @@ class HandshakeDoneFrame : public Frame {
         assert(ID == this->ID());
     }
     uint8_t ID() const override { return 0x1e; }
+
     FrameType Type() const override { return FrameType::HANDSHAKE_DONE; }
+
+    const char* Name() const override { return "HANDSHAKE_DONE"; }
+
     int Encode(utils::ByteStream& stream) override {
         utils::encodeVarInt(stream, this->ID());
         return 0;
