@@ -24,6 +24,10 @@ ConnectionIDGenerator& ConnectionIDGenerator::Get() {
 ConnectionIDGenerator::ConnectionIDGenerator(size_t localConnectionIDLen)
     : connectionIDLen(localConnectionIDLen) {}
 
+void ConnectionIDGenerator::AddUsedConnectionID(ConnectionID uid) {
+    this->usedID.insert(uid);
+}
+
 ConnectionID::ConnectionID() : id{0}, valid{0}, len{0} {}
 
 ConnectionID::ConnectionID(IDType id, size_t len)

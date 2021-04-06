@@ -354,6 +354,7 @@ class Initial : public LongHeader {
     uint64_t GetPktNum() const override { return this->pktNum; }
 
     size_t PayloadLen() const override {
+        printf("this length = %d, pktNumLen = %d\n", this->length, this->pktNumLen);
         return this->length - (this->pktNumLen + 1);
     }
 

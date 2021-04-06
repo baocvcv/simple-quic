@@ -8,6 +8,7 @@
 #include <utility>
 #include <memory>
 #include <map>
+#include<iostream>
 
 #include "context/common.hh"
 #include "context/callback.hh"
@@ -91,6 +92,8 @@ class QUIC {
     int SetStreamDataReadyCallback(uint64_t descriptor, uint64_t streamID,
                                    StreamDataReadyCallbackType callback);
 
+    int SetLocalStream(uint64_t descriptor, uint64_t streamID) {};
+
     int SocketLoop();
 
    protected:
@@ -104,7 +107,16 @@ class QUIC {
     PeerType type;
     utils::UDPSocket socket;
     std::map<uint64_t, std::shared_ptr<Connection>> connections;
-
+    std::map<std::shared_ptr<Connection>, std::shared_ptr<LocalConnectionContext> > connectionToLocalConect;
+    std::map<std::shared_ptr<Connection>, std::shared_ptr<RemoteConnectionContext> > connectionToRemoteConect;
+    // std::map<std::shared_ptr<Connection>, ConnectionID > connectionToID;
+    // std::map<std::shared_ptr<Connection>, std::shared_ptr<ConnectionID> > connectionToDstID;
+    // std::map<ConnectionID, std::shared_ptr<Connection> > connectionIDToConnection;
+    sockaddr_in addrDst;
+    StreamReadyCallbackType streamReadyCallback;
+    ConnectionReadyCallbackType connectionReadyCallback;
+    ConnectionCloseCallbackType connectionCloseCallback;
+    StreamDataReadyCallbackType streamDataReadyCallback;
 };
 
 class QUICServer : public QUIC {
@@ -119,7 +131,7 @@ class QUICServer : public QUIC {
     int SetConnectionReadyCallback(ConnectionReadyCallbackType callback);
 
    private:
-    ConnectionReadyCallbackType connectionReadyCallback;
+    
 };
 
 class QUICClient : public QUIC {
@@ -134,6 +146,8 @@ class QUICClient : public QUIC {
      * */
     uint64_t CreateConnection(struct sockaddr_in& addrTo,
                               const ConnectionReadyCallbackType& callback);
+    private:
+       // ConnectionReadyCallbackType connectionReadyCallback;
 };
 
 }  // namespace thquic::context

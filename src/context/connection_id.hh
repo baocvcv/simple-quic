@@ -29,6 +29,8 @@ class ConnectionIDGenerator {
 
     ConnectionID Generate();
 
+    void AddUsedConnectionID(ConnectionID uid); // { this->usedID.insert(uid); }
+
    private:
     explicit ConnectionIDGenerator(size_t localConnectionIDLen);
     std::set<ConnectionID> usedID;
