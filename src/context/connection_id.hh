@@ -30,6 +30,7 @@ class ConnectionIDGenerator {
     ConnectionID Generate();
 
     void AddUsedConnectionID(ConnectionID uid); // { this->usedID.insert(uid); }
+    void EraseConnectionID(ConnectionID uid);
 
    private:
     explicit ConnectionIDGenerator(size_t localConnectionIDLen);

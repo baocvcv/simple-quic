@@ -28,6 +28,10 @@ void ConnectionIDGenerator::AddUsedConnectionID(ConnectionID uid) {
     this->usedID.insert(uid);
 }
 
+void ConnectionIDGenerator::EraseConnectionID(ConnectionID uid) {
+    this->usedID.erase(uid);
+}
+
 ConnectionID::ConnectionID() : id{0}, valid{0}, len{0} {}
 
 ConnectionID::ConnectionID(IDType id, size_t len)

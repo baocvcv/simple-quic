@@ -152,6 +152,25 @@ class Connection {
         return this->localConnectionID;
     }
 
+    size_t GetFinalSizeByStreamID(uint64_t streamID) {
+        size_t totLen = 0;
+        for (auto pkt: this->pendingPackets) {
+            // Use length of the total packet (for both header and the payload) or just the payload?
+            // totLen += pkt->EncodeLen();
+            auto pld = pkt->GetPktPayload();
+            for (auto frm: pld->GetFrames()) {
+                // Just STREAM frames are needed to be calculated or orther frames?
+                if (frm->Type() == payload::FrameType::STREAM || frm->Type() == payload::FrameType::MAX_STREAMS || frm->Type() == payload::FrameType::MAX_STREAM_DATA) {
+                    std::shared_ptr<payload::StreamFrame> strmFrm = std::dynamic_pointer_cast<payload::StreamFrame>(frm);
+                    if (strmFrm->StreamID() == streamID) {
+                        totLen += frm->EncodeLen();
+                    }
+                }
+            }
+        }
+        return totLen;
+    }
+
    private:
     static std::map<uint64_t, bool> connectionDescriptorToState;
     std::list<std::shared_ptr<payload::Packet>> pendingPackets;
