@@ -187,7 +187,7 @@ uint64_t decodeVarInt(ByteStream& stream) {
                      << static_cast<uint64_t>(8 * (decodeSize - 2));
             [[fallthrough]];
         case 0:
-            value |= static_cast<uint64_t>(buf[0])
+            value |= static_cast<uint64_t>(buf[0] & 0x3F)
                      << static_cast<uint64_t>(8 * (decodeSize - 1));
             break;
         default:

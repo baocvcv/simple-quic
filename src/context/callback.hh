@@ -40,6 +40,12 @@ using StreamReadyCallbackType = std::function<int(uint64_t, uint64_t)>;
 using StreamDataReadyCallbackType = std::function<int(
     uint64_t, uint64_t, std::unique_ptr<uint8_t[]>, size_t, bool)>;
 
+
+using SentPktACKedCallbackType = std::function<int(
+    uint64_t)>;
+
 }  // namespace thquic::context
+
+
 
 #endif  // THQUIC_CALLBACK_HH
