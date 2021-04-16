@@ -8,7 +8,7 @@
 namespace thquic::context {
 
 constexpr uint64_t MAX_STREAM_NUM = 32;
-constexpr uint64_t MAX_CONNECTION_NUM = 100;
+constexpr uint64_t MAX_CONNECTION_NUM = 1000;
 
 enum class StreamState {
     UNDEFINED,
@@ -144,13 +144,21 @@ class Connection {
         throw std::runtime_error("Connection descriptor exhausted!");*/
     }
 
-    uint64_t GenerateStreamID() {
+    uint64_t GenerateStreamID(PeerType type, bool bidirectional) {
         for (uint64_t i = 0; i < MAX_STREAM_NUM; i++) {
-            auto insertRes = usedStreamID.insert(i);
+            // step1: form a streamID
+            uint64_t streamID = 0x0;
+            if(type != PeerType::CLIENT)
+                streamID |= 0x1;
+            if (!bidirectional)
+                streamID |= 0x2;
+            uint64_t type = streamID; 
+
+            auto insertRes = usedStreamID[type].insert(i);
             if (insertRes.second) {
                 this->streamState[i] = StreamState::RUNNING;
                 this->streamIDToStream[i] = Stream(i, StreamState::RUNNING);
-                return i;
+                return (((i<<2)&0xFFFFFFFFFFFFFFFC)|type);
             }
         }
         throw std::runtime_error("Stream id for ths connection exhausted");
@@ -403,6 +411,11 @@ class Connection {
         this->whetherNeedACK.push_back(_wn);
     }
 
+    void AddWhetherNeedACK_to_front(bool _wn) {
+        // Does this packet need to be acked?
+        this->whetherNeedACK.push_front(_wn);
+    }
+
     bool GetPendingPackageNeedACK() {
         return this->whetherNeedACK.front();
     }
@@ -466,7 +479,7 @@ class Connection {
     ConnectionID localConnectionID;
     ConnectionID remoteConnectionID;
 
-    std::set<uint64_t> usedStreamID;
+    std::set<uint64_t> usedStreamID[4];
     std::map<uint64_t, bool> streamFeature;
     std::map<uint64_t, StreamState> streamState;
     std::map<uint64_t, Stream> streamIDToStream;

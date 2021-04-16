@@ -11,18 +11,18 @@ class Interval {
    public:
     enum class PointCompResult {
         LEFT,
-        LEFT_EXTENSIBLE,
+        LEFT_EXTENSIBLE, // left just by 1 element, which is "l-1" to [l,r]
         INNER,
-        RIGHT_EXTENSIBLE,
+        RIGHT_EXTENSIBLE,// right just by 1 element, which is "r+1" to [l.r]
         RIGHT
     };
     enum class IntervalCompResult {
         LEFT,
-        LEFT_EXTENSIBLE,
+        LEFT_EXTENSIBLE, // [l1,r1] is left_extensible to [l1=r1+1,r2]
         LEFT_INTERSECT,
         INNER,
         RIGHT_INTERSECT,
-        RIGHT_EXTENSIBLE,
+        RIGHT_EXTENSIBLE,// [l2,r2] is right_extensible to [l1,r1=l2-1]
         RIGHT,
         OUTER
     };

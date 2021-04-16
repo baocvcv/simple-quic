@@ -91,7 +91,7 @@ uint64_t QUICClient::CreateConnection([[maybe_unused]] struct sockaddr_in& addrT
 
 uint64_t QUIC::CreateStream([[maybe_unused]] uint64_t descriptor, [[maybe_unused]] bool bidirectional) {
     std::shared_ptr<Connection> streamConnection = this->connections[descriptor];
-    uint64_t newStreamID = streamConnection->GenerateStreamID();
+    uint64_t newStreamID = streamConnection->GenerateStreamID(type, bidirectional);
     streamConnection->SetStreamFeature(newStreamID, bidirectional);
     return newStreamID;
     // return 0;
@@ -232,7 +232,31 @@ int QUIC::SocketLoop() {
             struct timeval curTime;
             gettimeofday(&curTime, nullptr);
             uint64_t msec = curTime.tv_usec;
+
+            // /* add needResendPkts to the end of pendingPackets */
+            // auto notAckedSentPkt = connection.second->GetNotACKedSentPkt();
+            // uint64_t _needACKIdx = 0;
+            // std::list<ACKTimer> newNeedACK;
+            // newNeedACK.clear();
+            // utils::IntervalSet ackedPktNum;
+            // for (auto _needACKStPkt: notAckedSentPkt) { // For those not acked packages.
+            //     if ((msec - _needACKStPkt.remTime > MAX_RTT) && 
+            //         (!ackedPktNum.Contain(_needACKStPkt.pktNum))) {
+            //         ackedPktNum.AddInterval(_needACKStPkt.pktNum, _needACKStPkt.pktNum);
+            //         // utils::logger::info("not acked packet.. msec = {}, remTime = {}", msec, _needACKStPkt.remTime);
+            //         pendingPackets.push_back(connection.second->GetSentPktByIdx(_needACKStPkt.idx));
+            //         connection.second->AddWhetherNeedACK(true);
+            //     } else {
+            //         // utils::logger::info("tout not acked packet.. msec = {}, remTime = {}", msec, _needACKStPkt.remTime);
+            //         newNeedACK.push_back(ACKTimer{_needACKStPkt.pktNum, msec, _needACKStPkt.idx});
+            //     }
+            // }
+            // notAckedSentPkt.clear();
+            // notAckedSentPkt = newNeedACK;
+
+            /* add needResendPkts to the front of pendingPackets */
             auto notAckedSentPkt = connection.second->GetNotACKedSentPkt();
+            notAckedSentPkt.reverse();
             uint64_t _needACKIdx = 0;
             std::list<ACKTimer> newNeedACK;
             newNeedACK.clear();
@@ -242,11 +266,11 @@ int QUIC::SocketLoop() {
                     (!ackedPktNum.Contain(_needACKStPkt.pktNum))) {
                     ackedPktNum.AddInterval(_needACKStPkt.pktNum, _needACKStPkt.pktNum);
                     // utils::logger::info("not acked packet.. msec = {}, remTime = {}", msec, _needACKStPkt.remTime);
-                    pendingPackets.push_back(connection.second->GetSentPktByIdx(_needACKStPkt.idx));
-                    connection.second->AddWhetherNeedACK(true);
+                    pendingPackets.push_front(connection.second->GetSentPktByIdx(_needACKStPkt.idx));
+                    connection.second->AddWhetherNeedACK_to_front(true);
                 } else {
                     // utils::logger::info("tout not acked packet.. msec = {}, remTime = {}", msec, _needACKStPkt.remTime);
-                    newNeedACK.push_back(ACKTimer{_needACKStPkt.pktNum, msec, _needACKStPkt.idx});
+                    newNeedACK.push_front(ACKTimer{_needACKStPkt.pktNum, msec, _needACKStPkt.idx});
                 }
             }
             notAckedSentPkt.clear();
