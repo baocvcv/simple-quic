@@ -5,6 +5,10 @@
 #include <set>
 #include <map>
 #include <sys/time.h>
+
+#define min(a,b) (((a)<(b))?(a):(b))
+#define max(a,b) (((a)>(b))?(a):(b))
+
 namespace thquic::context {
 
 constexpr uint64_t MAX_STREAM_NUM = 32;
@@ -24,9 +28,15 @@ enum class ConnectionState {
     CLOSED,   // sec 17.2.3
 };
 
-const int MAC_ACK_DELAY = 25;
+// const int MAX_ACK_DELAY = 25;
 
-int MAX_RTT = 200;
+int INITIAL_RTT = 500;//msec
+int kPacketThreshold = 3;
+float kTimeThreshold = (9/8);
+int kGranualarity = 1;//msec
+// int INITIAL_SPACE = 0;
+// int HANDSHAKE_SPACE = 1;
+// int APPLICATIONDATA_SPACE = 2;
 
 struct ACKTimer {
    uint64_t pktNum;
@@ -123,6 +133,19 @@ class Connection {
         return this->pendingPackets;
     }
 
+    void Initial() {
+        struct timeval curTime;
+        gettimeofday(&curTime, nullptr);
+        // TODO::what is reset of loss_detection_timer??
+        loss_detection_timer_msec = curTime.tv_sec * 1000;
+        latest_rtt = 0;
+        smoothed_rtt = INITIAL_RTT;
+        rtt_var = INITIAL_RTT / 2;
+        min_rtt = 0;
+        first_rtt_sample = 0;
+        larget_acked_packet = INFINITY;
+    }
+
     void SetConnectionState(ConnectionState _sta) {
         this->curState = _sta;
     }
@@ -197,7 +220,7 @@ class Connection {
     // to the socket and add ACK frame in the payload
     // StreamReadyCallback: add the new stream to self stream and send an INITIAL package
     int InsertStream(uint64_t streamID, bool bidirectional) {
-        auto insertRes = this->usedStreamID.insert(streamID);
+        auto insertRes = this->usedStreamID[streamID&0x3].insert((streamID>>2)&0x3FFFFFFFFFFFFFFF);
         if (!insertRes.second) {
             return -1; // has existed in this connection
         }
@@ -208,7 +231,7 @@ class Connection {
     }
 
     bool IsStreamIDUsed(uint64_t streamID) {
-        return !(this->usedStreamID.find(streamID) == this->usedStreamID.end());
+        return !(this->usedStreamID[streamID&0x3].find((streamID>>2)&0x3FFFFFFFFFFFFFFF) == this->usedStreamID[streamID&0x3].end());
     }
 
     void SetDstConnectionID(const ConnectionID& cid) {
@@ -299,7 +322,7 @@ class Connection {
         
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
-        uint64_t msec = curTime.tv_usec; // / 1000;
+        uint64_t msec = curTime.tv_sec * 1000; // / 1000;
         this->notACKedSentPkt.push_back(ACKTimer{pn, msec, _sentIdx});
         // this->notACKedSentPkt.push_back(ACKTimer{pn, MAX_RTT});
     }
@@ -312,19 +335,24 @@ class Connection {
         // ...Any other solution?
         // utils::logger::info("Now going to print the removed need ACK packets");
         std::list<ACKTimer> newNotACKedSentPkt;
+        std::map<uint64_t,uint64_t> newlatestACKedSentPktNum;
         newNotACKedSentPkt.clear();
+        newlatestACKedSentPktNum.clear();
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
-        uint64_t msec = curTime.tv_usec; // / 1000;
+        uint64_t msec = curTime.tv_sec * 1000; // / 1000;
         for (auto _nns: this->notACKedSentPkt) {
             if (!_recACKInterval.Contain(_nns.pktNum)) {
                 newNotACKedSentPkt.push_back(ACKTimer{_nns.pktNum, msec, _nns.idx});
             } else {
                 // printf("%d ", _nns.pktNum);
+                newlatestACKedSentPktNum[_nns.pktNum] = _nns.remTime;
             }
         }
         this->notACKedSentPkt.clear();
         this->notACKedSentPkt = newNotACKedSentPkt;
+        this->latestACKedSentPktNum.clear();
+        this->latestACKedSentPktNum = newlatestACKedSentPktNum;
         // printf("\n");
     }
 
@@ -370,7 +398,7 @@ class Connection {
             _notACKInS.AddInterval(pn, pn);
         }
         _notACKInS.AddIntervalSet(this->recPktNum); // add received package number
-        std::shared_ptr<payload::ACKFrame> _ackFrm = std::make_shared<payload::ACKFrame>(MAC_ACK_DELAY, 
+        std::shared_ptr<payload::ACKFrame> _ackFrm = std::make_shared<payload::ACKFrame>(latest_rtt, 
                                                             _notACKInS);
         this->notACKedRecPkt.clear();
         return _ackFrm;
@@ -384,7 +412,7 @@ class Connection {
         std::list<ACKTimer> newNotACKedRecPkt;
         for (auto _notACKPkt: this->notACKedRecPkt) {
             uint64_t pn = _notACKPkt.pktNum;
-            if (msec - _notACKPkt.remTime > MAC_ACK_DELAY) {
+            if (msec - _notACKPkt.remTime > latest_rtt) {
                 _notACKInS.AddInterval(pn, pn);
             } else {
                 newNotACKedRecPkt.push_back(_notACKPkt);
@@ -394,7 +422,7 @@ class Connection {
         if (_notACKInS.Empty()) {
             return nullptr;
         }
-        std::shared_ptr<payload::ACKFrame> _ackFrm = std::make_shared<payload::ACKFrame>(MAC_ACK_DELAY, 
+        std::shared_ptr<payload::ACKFrame> _ackFrm = std::make_shared<payload::ACKFrame>(latest_rtt, 
                                                             _notACKInS);
         // uint64_t _usePktNum = this->GetNewPktNum();
         std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(1, 
@@ -469,6 +497,49 @@ class Connection {
         // printf("\n");
     }
 
+    void updateLargestACKedPacket(utils::IntervalSet _ACKedRange) {
+        uint64_t larget_acked = (_ACKedRange.GetStart() >= _ACKedRange.GetEnd()) ? _ACKedRange.GetStart() : _ACKedRange.GetEnd();
+        if(this->larget_acked_packet == INFINITY) {
+            larget_acked_packet = larget_acked;
+        }
+        else {
+            larget_acked_packet = max(larget_acked_packet,larget_acked);
+        }
+    }
+
+    void updateRTT(std::shared_ptr<payload::ACKFrame> _ackRecFrm) {
+        uint64_t ACKdelay = _ackRecFrm->GetACKDelay();
+        uint64_t largestACKed = _ackRecFrm->GetLargestACKed();
+        if(this->latestACKedSentPktNum.size() > 0) {
+            auto latestACKedSentPktNum_last = latestACKedSentPktNum.end();
+            latestACKedSentPktNum_last--;
+            uint64_t larget_new_acked_packets_number = latestACKedSentPktNum_last->first;
+            uint64_t larget_new_acked_packets_sent_time = latestACKedSentPktNum_last->second;
+            if(larget_new_acked_packets_number == largestACKed) {
+                // TODO:: "IncludesAckEliciting(newly_acked_packets" for case in "if" above
+                struct timeval curTime;
+                gettimeofday(&curTime,nullptr);
+                this->latest_rtt = curTime.tv_sec * 1000 - larget_new_acked_packets_sent_time;
+                if(first_rtt_sample == 0) {
+                    min_rtt = latest_rtt;
+                    smoothed_rtt = latest_rtt;
+                    rtt_var = latest_rtt / 2;
+                    first_rtt_sample = curTime.tv_sec * 1000;
+                }
+                else {
+                    min_rtt = min(min_rtt, latest_rtt);
+                    // TODO::what to do with handshake comfirmed
+                    // ACKdelay = min(ACKdelay,max_ack_delay);
+                    uint64_t adjusted_rtt = latest_rtt;
+                    if (min_rtt + ACKdelay < latest_rtt)
+                        adjusted_rtt = latest_rtt - ACKdelay;
+                    rtt_var = (3 * rtt_var + ((smoothed_rtt-adjusted_rtt)&0x7FFFFFFFFFFFFFFF)) / 4;
+                    smoothed_rtt = (7 * smoothed_rtt + adjusted_rtt) / 8;
+                }
+            }
+        }
+    }
+
 
    private:
     
@@ -500,6 +571,7 @@ class Connection {
     // use the index of the package in the recPkt/sentPkt or just the pktNum?
     std::list<ACKTimer> notACKedRecPkt;
     std::list<ACKTimer> notACKedSentPkt;
+    std::map<uint64_t,uint64_t> latestACKedSentPktNum;
     
 
     utils::IntervalSet tmpRecACKInterval;
@@ -507,6 +579,15 @@ class Connection {
 
     bool _containInACKInterval(ACKTimer _at) {return this->tmpRecACKInterval.Contain(_at.pktNum); };
 
+    // RTT related
+    uint64_t loss_detection_timer_msec;
+    uint64_t latest_rtt;
+    uint64_t smoothed_rtt;
+    uint64_t rtt_var;
+    uint64_t min_rtt;
+    uint64_t first_rtt_sample;
+    uint64_t larget_acked_packet;
+    uint64_t loss_time;
 };
 
 uint64_t Connection::connectionDescriptor = 0;

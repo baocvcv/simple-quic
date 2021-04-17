@@ -79,6 +79,7 @@ uint64_t QUICClient::CreateConnection([[maybe_unused]] struct sockaddr_in& addrT
     std::shared_ptr<payload::Packet> pkt = std::make_shared<payload::Packet>(initHdr, pld, addrTo);
 
     this->connections[connectionDes] = connection;
+    connection->Initial();
     connection->SetSockaddrTo(addrTo);
     connection->AddPacket(pkt);
     connection->AddWhetherNeedACK(true);
@@ -231,7 +232,8 @@ int QUIC::SocketLoop() {
             // ADD packets that need to be re-transmitted
             struct timeval curTime;
             gettimeofday(&curTime, nullptr);
-            uint64_t msec = curTime.tv_usec;
+            // uint64_t makes sure this is a positive number
+            uint64_t msec = curTime.tv_sec * 1000;
 
             // /* add needResendPkts to the end of pendingPackets */
             // auto notAckedSentPkt = connection.second->GetNotACKedSentPkt();
@@ -262,7 +264,7 @@ int QUIC::SocketLoop() {
             newNeedACK.clear();
             utils::IntervalSet ackedPktNum;
             for (auto _needACKStPkt: notAckedSentPkt) { // For those not acked packages.
-                if ((msec - _needACKStPkt.remTime > MAX_RTT) && 
+                if ((msec - _needACKStPkt.remTime > INITIAL_RTT) && 
                     (!ackedPktNum.Contain(_needACKStPkt.pktNum))) {
                     ackedPktNum.AddInterval(_needACKStPkt.pktNum, _needACKStPkt.pktNum);
                     // utils::logger::info("not acked packet.. msec = {}, remTime = {}", msec, _needACKStPkt.remTime);
@@ -411,6 +413,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     std::shared_ptr<payload::ACKFrame> _ackRecFrm = std::dynamic_pointer_cast<payload::ACKFrame>(_recFrm);
                     utils::IntervalSet _recACKInS = _ackRecFrm->GetACKRanges();
                     // utils::logger::warn("Going to remove ACKed sent packets from the connection INITIAL header");
+                    foundConnection->updateLargestACKedPacket(_recACKInS);
                     foundConnection->remNeedACKPkt(_recACKInS); // remove the sent packages that need ACK.
                     foundConnection->AddAckedSentPktNum(_recACKInS);
                 }
@@ -434,6 +437,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     std::shared_ptr<payload::ACKFrame> _ackRecFrm = std::dynamic_pointer_cast<payload::ACKFrame>(_recFrm);
                     utils::IntervalSet _recACKInS = _ackRecFrm->GetACKRanges();
                     // utils::logger::warn("Going to remove ACKed sent packets from the connection INITIAL header");
+                    foundConnection->updateLargestACKedPacket(_recACKInS);
                     foundConnection->remNeedACKPkt(_recACKInS); // remove the sent packages that need ACK.
                     foundConnection->AddAckedSentPktNum(_recACKInS);
                 }
@@ -472,7 +476,9 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     std::shared_ptr<payload::ACKFrame> _ackRecFrm = std::dynamic_pointer_cast<payload::ACKFrame>(_recFrm);
                     utils::IntervalSet _recACKInS = _ackRecFrm->GetACKRanges();
                     // utils::logger::warn("Going to remove ACKed sent packets from the connection INITIAL header");
+                    foundConnection->updateLargestACKedPacket(_recACKInS);
                     foundConnection->remNeedACKPkt(_recACKInS); // remove the sent packages that need ACK.
+                    foundConnection->updateRTT(_ackRecFrm);
                     foundConnection->AddAckedSentPktNum(_recACKInS);
                 }
             }
@@ -666,6 +672,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 // ACK frame only packet need not to be added to the need ack packet list.
                 std::shared_ptr<payload::ACKFrame> _ackRecFrm = std::dynamic_pointer_cast<payload::ACKFrame>(frm);
                 utils::IntervalSet _recACKInS = _ackRecFrm->GetACKRanges();
+                foundCon->updateLargestACKedPacket(_recACKInS);
                 utils::logger::warn("Going to remove ACKed sent packets from the connection");
                 foundCon->remNeedACKPkt(_recACKInS); // remove the sent packages that need ACK.
                 foundCon->AddAckedSentPktNum(_recACKInS);
@@ -761,6 +768,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 if (_recFrm->Type() == payload::FrameType::ACK) {
                     std::shared_ptr<payload::ACKFrame> _ackRecFrm = std::dynamic_pointer_cast<payload::ACKFrame>(_recFrm);
                     utils::IntervalSet _recACKInS = _ackRecFrm->GetACKRanges();
+                    foundCon->updateLargestACKedPacket(_recACKInS);
                     foundConnection->remNeedACKPkt(_recACKInS); // remove the sent packages that need ACK.
                 }
             }
@@ -771,6 +779,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 if (_recFrm->Type() == payload::FrameType::ACK) {
                     std::shared_ptr<payload::ACKFrame> _ackRecFrm = std::dynamic_pointer_cast<payload::ACKFrame>(_recFrm);
                     utils::IntervalSet _recACKInS = _ackRecFrm->GetACKRanges();
+                    foundCon->updateLargestACKedPacket(_recACKInS);
                     foundConnection->remNeedACKPkt(_recACKInS); // remove the sent packages that need ACK.
                 }
             }
