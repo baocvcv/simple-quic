@@ -36,6 +36,7 @@ int QUIC::CloseConnection([[maybe_unused]] uint64_t descriptor,[[maybe_unused]] 
     // auto _it = this->connections.find(descriptor);
     // this->connections.erase(_it);
     this->connections[descriptor]->SetConnectionState(ConnectionState::WAIT_FOR_PEER_CLOSE);
+    connection->SetWaitForPeerConCloseACKPktNum(_usePktNum);
     utils::logger::warn("Deregister connection {}", descriptor);
     ConnectionIDGenerator generator = ConnectionIDGenerator::Get();
     generator.EraseConnectionID(connection->getLocalConnectionID());
@@ -184,20 +185,26 @@ int QUIC::SocketLoop() {
     for(;;) {
         srand((unsigned int)(time(nullptr)));
         auto datagram = this->socket.tryRecvMsg(10ms);
-        if (datagram) {
+        while (datagram) {
             this->incomingMsg(std::move(datagram));
+            datagram = this->socket.tryRecvMsg(10ms);
         }
+        // if (datagram) {
+        //     this->incomingMsg(std::move(datagram));
+        // }
         // send packages
         for (auto& connection : this->connections) {
             // utils::logger::info("Now going to print the sent but not acked packets and rec but not acked packets");
-            connection.second->PrintSentNeedACKPktNum();
-            connection.second->PrintRecNotACKPktNum();
+            
+            // connection.second->PrintSentNeedACKPktNum();
+            // connection.second->PrintRecNotACKPktNum();
             auto& pendingPackets = connection.second->GetPendingPackets();
             
             // SEND regular packets
             while (!pendingPackets.empty()) {
                 // Have been ACKed --- need not to send again
                 if (connection.second->WhetherAckedPktNum(pendingPackets.front()->GetPktNum())) {
+                    connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
                     pendingPackets.pop_front();
                     connection.second->PopWhetherNeedACK();
                     continue;
@@ -215,8 +222,13 @@ int QUIC::SocketLoop() {
                 auto newDatagram = QUIC::encodeDatagram(pendingPackets.front());
                 if (rand() % 10 < 8)
                     this->socket.sendMsg(newDatagram);
+                connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
                 pendingPackets.pop_front();
                 connection.second->PopWhetherNeedACK();
+            }
+
+            if (connection.second->GetConnectionState() == ConnectionState::CLOSED) {
+                continue;
             }
 
             // SEND those packets that must be sent for ACK
@@ -239,10 +251,12 @@ int QUIC::SocketLoop() {
             utils::IntervalSet ackedPktNum;
             for (auto _needACKStPkt: notAckedSentPkt) { // For those not acked packages.
                 if ((msec - _needACKStPkt.remTime > MAX_RTT) && 
-                    (!ackedPktNum.Contain(_needACKStPkt.pktNum))) {
+                    (!ackedPktNum.Contain(_needACKStPkt.pktNum)) && 
+                    (!connection.second->WhetherToSendPktNum(_needACKStPkt.pktNum))) {
                     ackedPktNum.AddInterval(_needACKStPkt.pktNum, _needACKStPkt.pktNum);
                     // utils::logger::info("not acked packet.. msec = {}, remTime = {}", msec, _needACKStPkt.remTime);
-                    pendingPackets.push_back(connection.second->GetSentPktByIdx(_needACKStPkt.idx));
+                    connection.second->AddPacket(connection.second->GetSentPktByIdx(_needACKStPkt.idx));
+                    // pendingPackets.push_back(connection.second->GetSentPktByIdx(_needACKStPkt.idx));
                     connection.second->AddWhetherNeedACK(true);
                 } else {
                     // utils::logger::info("tout not acked packet.. msec = {}, remTime = {}", msec, _needACKStPkt.remTime);
@@ -457,17 +471,17 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
     }
     case(payload::PacketType::ONE_RTT): {
 
-        utils::logger::warn("Receive a ONE-RTT packet with packet number = {}", _recPktNum);
+        // utils::logger::warn("Receive a ONE-RTT packet with packet number = {}", _recPktNum);
         std::shared_ptr<payload::ShortHeader> shHdr = std::dynamic_pointer_cast<payload::ShortHeader>(hdr);
         auto frames = recPld->GetFrames();
-        utils::logger::info("Got frames, number = {}", frames.size());
+        // utils::logger::info("Got frames, number = {}", frames.size());
         bool haveAddedToACK = false;
         uint64_t nowIdx = 0;
         for (auto frm: frames) {
             nowIdx += 1;
             if (frm->Type() == payload::FrameType::STREAM) {
                 // STREAM Frame
-                utils::logger::info("Got a stream frame from the one-rtt packet.");
+                // utils::logger::info("Got a stream frame from the one-rtt packet.");
                 std::shared_ptr<payload::StreamFrame> streamFrm = std::dynamic_pointer_cast<payload::StreamFrame>(frm);
                 uint64_t streamID = streamFrm->StreamID();
                 const ConnectionID& localConID = shHdr->GetDstID();
@@ -485,7 +499,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 assert(foundCon != nullptr);
                 // utils::logger::info("In Stream frame with the pkt number = {}", _recPktNum);
                 if (foundCon->HaveReceivedPkt(_recPktNum)) {
-                    utils::logger::info("Haved received the packet = {}", _recPktNum);
+                    // utils::logger::info("Haved received the packet = {}", _recPktNum);
                     break;
                 }
                 // utils::logger::info("In Stream frame with the pkt number = {} not rec yet", _recPktNum);
@@ -540,9 +554,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 std::shared_ptr<Connection> foundCon = nullptr;
                 uint64_t conSeq;
                 for (auto con: this->connections) {
-                    if (con.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
-                        con.second->GetConnectionState() != ConnectionState::CLOSED &&
-                        con.second->getLocalConnectionID() == localConID) {
+                    if (con.second->getLocalConnectionID() == localConID) {
                         foundCon = con.second;
                         conSeq = con.first;
                         break;
@@ -559,6 +571,9 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                         foundCon->addNeedACKRecPkt(recPkt);
                         haveAddedToACK = true;
                     }
+                } else {
+                    foundCon->addRecPkt(recPkt);
+                    haveAddedToACK = true;
                 }
                 // CLOSE the stream HERE, then the CLOSE_STREAM packet do not need ack again.
                 foundCon->CloseStreamByID(streamID);
@@ -576,9 +591,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 std::shared_ptr<Connection> foundCon = nullptr;
                 uint64_t conSeq;
                 for (auto con: this->connections) {
-                    if (con.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
-                        con.second->GetConnectionState() != ConnectionState::CLOSED &&
-                        con.second->getLocalConnectionID() == localConID) {
+                    if (con.second->getLocalConnectionID() == localConID) {
                         foundCon = con.second;
                         conSeq = con.first;
                         break;
@@ -617,7 +630,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 this->connectionCloseCallback(conSeq, reason, errorCode);
                 // registter?? --- what's this?
             } else if (frm->Type() == payload::FrameType::ACK) {
-                utils::logger::warn("Receive an ACK frame");
+                // utils::logger::warn("Receive an ACK frame");
                 const ConnectionID& localConID = shHdr->GetDstID();
                 
                 std::shared_ptr<Connection> foundCon = nullptr;
@@ -630,7 +643,19 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                         break;
                     }
                 }
+                if (foundCon == nullptr) {
+                    // utils::logger::info("Got an ACK frame for a closed or erased connection. Break.");
+                    break;
+                }
+                std::shared_ptr<payload::ACKFrame> _ackRecFrm = std::dynamic_pointer_cast<payload::ACKFrame>(frm);
+                utils::IntervalSet _recACKInS = _ackRecFrm->GetACKRanges();
                 assert(foundCon != nullptr);
+                // utils::logger::warn("Wait for peer close pkt number = {}", 
+                //     foundCon->GetWaitForPeerConCloseACKPktNum());
+                if (foundCon->GetConnectionState() == ConnectionState::WAIT_FOR_PEER_CLOSE) {
+                    foundCon->SetConnectionState(ConnectionState::CLOSED);
+                    utils::logger::info("Receive an ACK for Connection_CLOSE frame, transition to CLOSED state.");
+                }
                 /*
                 if (foundCon->HaveReceivedPkt(_recPktNum)) { // HAVE close the connection
                     if (!haveAddedToACK && nowIdx == frames.size()) {
@@ -640,9 +665,9 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     break;
                 }*/
                 // ACK frame only packet need not to be added to the need ack packet list.
-                std::shared_ptr<payload::ACKFrame> _ackRecFrm = std::dynamic_pointer_cast<payload::ACKFrame>(frm);
-                utils::IntervalSet _recACKInS = _ackRecFrm->GetACKRanges();
-                utils::logger::warn("Going to remove ACKed sent packets from the connection");
+                
+                
+                // utils::logger::warn("Going to remove ACKed sent packets from the connection");
                 foundCon->remNeedACKPkt(_recACKInS); // remove the sent packages that need ACK.
                 foundCon->AddAckedSentPktNum(_recACKInS);
             }

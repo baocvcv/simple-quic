@@ -172,6 +172,7 @@ class Connection {
 
     void AddPacket(std::shared_ptr<payload::Packet> pk) {
         this->pendingPackets.push_back(pk);
+        this->toSendPktNum.AddInterval(pk->GetPktNum(), pk->GetPktNum());
     }
 
     void AddPacketACKCallback(SentPktACKedCallbackType clb) {
@@ -273,7 +274,7 @@ class Connection {
         gettimeofday(&curTime, nullptr);
         uint64_t msec = curTime.tv_usec; // / 1000;
         this->notACKedRecPkt.push_back(ACKTimer{pn, msec, _recIdx});
-        utils::logger::info("In add to need ack pkt");
+        // utils::logger::info("In add to need ack pkt");
     }
 
     void addNeedACKSentPkt(std::shared_ptr<payload::Packet> needACKPkt) {
@@ -303,20 +304,36 @@ class Connection {
         // this->notACKedSentPkt.remove_if(_containInACKInterval); // this->_... can only be used to call the func
         // ...Any other solution?
         // utils::logger::info("Now going to print the removed need ACK packets");
+        /*
+        printf("For received ack interval: \n");
+        for (int i = 1; i <= 10; i++) {
+            if (_recACKInterval.Contain(i)) {
+                printf("%d ", i);
+            }
+        }
+        printf("\n");*/
         std::list<ACKTimer> newNotACKedSentPkt;
         newNotACKedSentPkt.clear();
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
         uint64_t msec = curTime.tv_usec; // / 1000;
+        utils::IntervalSet _addedToNewACKedPktNum;
         for (auto _nns: this->notACKedSentPkt) {
-            if (!_recACKInterval.Contain(_nns.pktNum)) {
+            if (!_recACKInterval.Contain(_nns.pktNum) && !_addedToNewACKedPktNum.Contain(_nns.pktNum)) {
                 newNotACKedSentPkt.push_back(ACKTimer{_nns.pktNum, msec, _nns.idx});
+                _addedToNewACKedPktNum.AddInterval(_nns.pktNum, _nns.pktNum);
             } else {
                 // printf("%d ", _nns.pktNum);
             }
         }
         this->notACKedSentPkt.clear();
         this->notACKedSentPkt = newNotACKedSentPkt;
+        /*
+        printf("For remained not acked sent packets: \n");
+        for (auto _newNotACKPkt: this->notACKedSentPkt) {
+            printf("%d ", _newNotACKPkt.pktNum);
+        }
+        printf("\n");*/
         // printf("\n");
     }
 
@@ -395,6 +412,14 @@ class Connection {
         pl->AttachFrame(_ackFrm);
         std::shared_ptr<payload::Packet> pk = std::make_shared<payload::Packet>(shHdr, pl, this->GetSockaddrTo());
         this->notACKedRecPkt = newNotACKedRecPkt;
+        /*
+        printf("For packet numbers contained in the sent ACK frame: \n");
+        for (int i = 1; i <= 9; i++) {
+            if (_notACKInS.Contain(i)) {
+                printf("%d ", i);
+            }
+        }
+        printf("\n");*/
         return pk;
     }
 
@@ -440,6 +465,22 @@ class Connection {
         return this->ackedSentPktNum.Contain(_jn);
     }
 
+    void RemoveToSendPktNum(uint64_t _jn) {
+        this->toSendPktNum.RemoveInterval(_jn, _jn);
+    }
+
+    bool WhetherToSendPktNum(uint64_t _jn) {
+        return this->toSendPktNum.Contain(_jn);
+    }
+
+    void SetWaitForPeerConCloseACKPktNum(uint64_t _jn) {
+        this->waitForPeerConCloseACKPktNum = _jn;
+    }
+
+    uint64_t GetWaitForPeerConCloseACKPktNum() {
+        return this->waitForPeerConCloseACKPktNum;
+    }
+
     void PrintSentNeedACKPktNum() {
         // utils::logger::info("Now print the packet numbers for those sent packets which have not been acked");
         for (auto _notAckedPkt: this->notACKedSentPkt) {
@@ -455,6 +496,7 @@ class Connection {
         }
         // printf("\n");
     }
+
 
 
    private:
@@ -480,6 +522,7 @@ class Connection {
     utils::IntervalSet sentPktNum;
     utils::IntervalSet recPktNum;
     utils::IntervalSet ackedSentPktNum;
+    utils::IntervalSet toSendPktNum;
     std::vector<std::shared_ptr<payload::Packet> > recPkt;
     std::vector<std::shared_ptr<payload::Packet> > sentPkt;
     std::list<SentPktACKedCallbackType> sentPktACKCallback; // sync with sentPkt
@@ -491,6 +534,7 @@ class Connection {
 
     utils::IntervalSet tmpRecACKInterval;
     uint64_t nowPktNum = 0;
+    uint64_t waitForPeerConCloseACKPktNum;
 
     bool _containInACKInterval(ACKTimer _at) {return this->tmpRecACKInterval.Contain(_at.pktNum); };
 
