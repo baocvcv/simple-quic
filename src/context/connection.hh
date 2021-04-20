@@ -516,7 +516,7 @@ class Connection {
             uint64_t larget_new_acked_packets_number = latestACKedSentPktNum_last->first;
             uint64_t larget_new_acked_packets_sent_time = latestACKedSentPktNum_last->second;
             if(larget_new_acked_packets_number == largestACKed) {
-                // TODO:: "IncludesAckEliciting(newly_acked_packets" for case in "if" above
+                // TODO:: "IncludesAckEliciting(newly_acked_packets)" for case in "if" above
                 struct timeval curTime;
                 gettimeofday(&curTime,nullptr);
                 this->latest_rtt = curTime.tv_sec * 1000 - larget_new_acked_packets_sent_time;
