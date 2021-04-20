@@ -695,16 +695,11 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     break;
                 }*/
                 // ACK frame only packet need not to be added to the need ack packet list.
-<<<<<<< HEAD
                 std::shared_ptr<payload::ACKFrame> _ackRecFrm = std::dynamic_pointer_cast<payload::ACKFrame>(frm);
                 utils::IntervalSet _recACKInS = _ackRecFrm->GetACKRanges();
                 foundCon->updateLargestACKedPacket(_recACKInS);
                 utils::logger::warn("Going to remove ACKed sent packets from the connection");
-=======
-                
-                
                 // utils::logger::warn("Going to remove ACKed sent packets from the connection");
->>>>>>> 2bbc033cdf4a19f76d4b8c690b46aa7b37965d4f
                 foundCon->remNeedACKPkt(_recACKInS); // remove the sent packages that need ACK.
                 foundCon->AddAckedSentPktNum(_recACKInS);
             }
