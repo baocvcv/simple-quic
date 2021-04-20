@@ -574,7 +574,7 @@ class StreamFrame : public StreamSpecificFrame {
                                         uint64_t offset, bool len) {
         size_t predictedLen = 1;
         predictedLen += utils::encodeVarIntLen(streamID);
-        predictedLen += utils::encodeVarIntLen(offset);
+
         if (offset != 0) {
             predictedLen += utils::encodeVarIntLen(offset);
         }

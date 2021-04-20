@@ -38,8 +38,24 @@ target_link_libraries(${PROJECT_NAME}_server
 
 add_executable(${PROJECT_NAME}_client
     "src/client.cc"
-        src/context/common.hh src/context/callback.hh)
+)
 
 target_link_libraries(${PROJECT_NAME}_client
+    lib${PROJECT_NAME}
+)
+
+add_executable(${PROJECT_NAME}_cc_server
+    "src/cc_server.cc"
+)
+
+target_link_libraries(${PROJECT_NAME}_cc_server
+    lib${PROJECT_NAME}
+)
+
+add_executable(${PROJECT_NAME}_cc_client
+    "src/cc_client.cc"
+)
+
+target_link_libraries(${PROJECT_NAME}_cc_client
     lib${PROJECT_NAME}
 )
