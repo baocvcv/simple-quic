@@ -107,10 +107,11 @@ int QUIC::CloseStream([[maybe_unused]] uint64_t descriptor, [[maybe_unused]] uin
     size_t finalSize = connection->GetFinalSizeByStreamID(streamID);
     std::shared_ptr<payload::ResetStreamFrame> fr = std::make_shared<payload::ResetStreamFrame>(streamID, 0, finalSize);
     
-    const ConnectionID& localConID = connection->getLocalConnectionID();
+    // const ConnectionID& localConID = connection->getLocalConnectionID();
     uint64_t _usePktNum = connection->GetNewPktNum();
     // pktNumLen | dstConID | pktNum
-    std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(1, 
+    uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
+    std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
                                             connection->getRemoteConnectionID(), _usePktNum);
     std::shared_ptr<payload::Payload> pl = std::make_shared<payload::Payload>();
     pl->AttachFrame(fr);
@@ -135,18 +136,27 @@ int QUIC::SendData([[maybe_unused]] uint64_t descriptor, [[maybe_unused]] uint64
     // stream frame: streamID | unique_ptr<uint8_t[]> buf | bufLen | offset | LEN | FIN
     // thquic::payload::StreamFrame fr(streamID, std::move(buf), len, 0, true, FIN);
     std::shared_ptr<Connection> connection = this->connections[descriptor];
-    uint64_t nowOffset = connection->GetStreamByID(streamID).GetUpdateOffset(len);
-    std::shared_ptr<payload::StreamFrame> fr = std::make_shared<payload::StreamFrame>(streamID, std::move(buf), len, nowOffset, true, FIN);
-    
-    const ConnectionID& localConID = connection->getLocalConnectionID();
-    uint64_t _usePktNum = connection->GetNewPktNum();
-    utils::logger::info("Sending data with packet numbeer = {}", _usePktNum);
-    // pktNumLen | dstConID | pktNum
-    std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(1, 
-                                                    connection->getRemoteConnectionID(), _usePktNum);
-    std::shared_ptr<payload::Payload> pl = std::make_shared<payload::Payload>();
-    pl->AttachFrame(fr);
-    std::shared_ptr<payload::Packet> pk = std::make_shared<payload::Packet>(shHdr, pl, connection->GetSockaddrTo());
+    std::shared_ptr<payload::Packet> pk = nullptr;
+    utils::logger::info("Sending data, totlen = {}", len);
+    if (len <= MAX_PACKET_DATA_LENGTH) {
+        uint64_t nowOffset = connection->GetStreamByID(streamID).GetUpdateOffset(len);
+        std::shared_ptr<payload::StreamFrame> fr = std::make_shared<payload::StreamFrame>(streamID, std::move(buf), len, nowOffset, true, FIN);
+        
+        // const ConnectionID& localConID = connection->getLocalConnectionID();
+        uint64_t _usePktNum = connection->GetNewPktNum();
+        utils::logger::info("Sending data with packet numbeer = {}, len = {}. fin = {}", _usePktNum, 
+                            len, FIN);
+        uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
+        // pktNumLen | dstConID | pktNum
+        std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
+                                                        connection->getRemoteConnectionID(), _usePktNum);
+        std::shared_ptr<payload::Payload> pl = std::make_shared<payload::Payload>();
+        pl->AttachFrame(fr);
+        pk = std::make_shared<payload::Packet>(shHdr, pl, connection->GetSockaddrTo());
+    } else {
+        connection->AddToUnsentBuf(std::move(buf), streamID, len, FIN);
+        pk = connection->GetPktFromUnsentBuf();
+    }
     // ADD pkt to this connection
     this->connections[descriptor]->AddPacket(pk);
     // ADD needACK property to the added pending packet
@@ -200,8 +210,10 @@ int QUIC::SocketLoop() {
             // connection.second->PrintSentNeedACKPktNum();
             // connection.second->PrintRecNotACKPktNum();
             auto& pendingPackets = connection.second->GetPendingPackets();
+            int sentWhenCongested = 0;
             
             // SEND regular packets
+            // utils::logger::info("Number of pending packets = {}", pendingPackets.size());
             while (!pendingPackets.empty()) {
                 // Have been ACKed --- need not to send again
                 if (connection.second->WhetherAckedPktNum(pendingPackets.front()->GetPktNum())) {
@@ -210,6 +222,21 @@ int QUIC::SocketLoop() {
                     connection.second->PopWhetherNeedACK();
                     continue;
                 }
+                // IF cannot be sent due to the limitation by the current congestionWindow, break;
+                bool _whetherCanSend = connection.second->WhetherCanSendPkt(pendingPackets.front()->EncodeLen());
+                if (connection.second->GetPendingPackageNeedACK() == true && 
+                    !_whetherCanSend && 
+                    sentWhenCongested >= 2) {
+                    
+                    // utils::logger::info("Need ack but cannot be sent. pktnum = {}, encodlen = {}", 
+                    //                     pendingPackets.front()->GetPktNum(), 
+                    //                     pendingPackets.front()->EncodeLen());
+                    break;
+                } else if (connection.second->GetPendingPackageNeedACK() == true && 
+                    !_whetherCanSend) {
+                        sentWhenCongested += 1;
+                        utils::logger::info("Sending packet when congested.");
+                    }
                 if (connection.second->GetPendingPackageNeedACK() == true) {
                     connection.second->addNeedACKSentPkt(pendingPackets.front());
                 } else {
@@ -224,8 +251,12 @@ int QUIC::SocketLoop() {
                 if (rand() % 10 < 8)
                     this->socket.sendMsg(newDatagram);
                 connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
+                // UPDATE this connection's onFlight packet length;
+                if (connection.second->GetPendingPackageNeedACK() == true)
+                    connection.second->UpdateOnFlightBySentPktLen(pendingPackets.front()->EncodeLen());
                 pendingPackets.pop_front();
                 connection.second->PopWhetherNeedACK();
+                
             }
 
             if (connection.second->GetConnectionState() == ConnectionState::CLOSED) {
@@ -270,29 +301,38 @@ int QUIC::SocketLoop() {
 
             /* add needResendPkts to the front of pendingPackets */
             auto notAckedSentPkt = connection.second->GetNotACKedSentPkt();
-            notAckedSentPkt.reverse();
-            uint64_t _needACKIdx = 0;
+            // uint64_t _needACKIdx = 0;
             std::list<ACKTimer> newNeedACK;
             newNeedACK.clear();
             utils::IntervalSet ackedPktNum;
+            utils::logger::info("Number of not acked sent packets = {}", notAckedSentPkt.size());
             for (auto _needACKStPkt: notAckedSentPkt) { // For those not acked packages.
-                if ((msec - _needACKStPkt.remTime > connection.second->getConnectionRTT()) && 
+                if ( // (msec - _needACKStPkt.remTime > connection.second->getConnectionRTT()) && 
+                    (msec - _needACKStPkt.remTime > 500) && 
                     (!ackedPktNum.Contain(_needACKStPkt.pktNum)) && 
                     (!connection.second->WhetherToSendPktNum(_needACKStPkt.pktNum))) {
                     ackedPktNum.AddInterval(_needACKStPkt.pktNum, _needACKStPkt.pktNum);
                     // utils::logger::info("not acked packet.. msec = {}, remTime = {}", msec, _needACKStPkt.remTime);
                     connection.second->AddPacket(connection.second->GetSentPktByIdx(_needACKStPkt.idx));
                     // pendingPackets.push_back(connection.second->GetSentPktByIdx(_needACKStPkt.idx));
+                    // RETRANSMITTED packets need no ack: they should not be added to the notACKedSentPkt again;
                     connection.second->AddWhetherNeedACK(true);
                 } else {
                     // utils::logger::info("tout not acked packet.. msec = {}, remTime = {}", msec, _needACKStPkt.remTime);
-                    newNeedACK.push_front(ACKTimer{_needACKStPkt.pktNum, msec, _needACKStPkt.idx});
+                    newNeedACK.push_front(ACKTimer{_needACKStPkt.pktNum, msec, _needACKStPkt.idx, _needACKStPkt.pktLen});
                 }
             }
             notAckedSentPkt.clear();
             notAckedSentPkt = newNeedACK;
+
+            // Get unsend pakcets.
+            std::shared_ptr<payload::Packet> toSendPkt = connection.second->GetPktFromUnsentBuf();
+            if (toSendPkt != nullptr) {
+                connection.second->AddPacket(toSendPkt);
+                connection.second->AddWhetherNeedACK(true);
+            }
         }
-        std::this_thread::sleep_for(1s);
+        std::this_thread::sleep_for(100ms);
     }
     return 0;
 }
@@ -387,7 +427,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
             connection->AddWhetherNeedACK(true);
             
             connection->SetConnectionState(ConnectionState::PEER_ESTABLISHED);
-            this->connectionReadyCallback(descriptor); // callback connection ready function
+            this->connectionReadyCallback(conDes); // callback connection ready function
             
         } else if (foundConnection->GetConnectionState() == ConnectionState::CREATED) {
             if (foundConnection->HaveReceivedPkt(_recPktNum)) {
@@ -401,9 +441,11 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                                 localConID.ToString(), remoteConID.ToString());
             this->connectionReadyCallback(descriptor); // callback connection ready function
             foundConnection->SetConnectionState(ConnectionState::ESTABLISHED);
+            foundConnection->InitCongestionState(MAX_PACKET_LENGTH, 
+                                                MAX_PACKET_LENGTH * 10);
             
             // ACKed
-            uint64_t recPktNum = recPkt->GetPktNum();
+            // uint64_t recPktNum = recPkt->GetPktNum();
             uint64_t _usePktNum = foundConnection->GetNewPktNum();
             std::shared_ptr<payload::Initial> initHdr = std::make_shared<payload::Initial>(4, 1, localConID, remoteConID, _usePktNum);
             utils::ByteStream emptyBys(nullptr, 0);
@@ -440,6 +482,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
             // utils::logger::info("Got a feedback connection peer_established packet = {} not contained", _recPktNum);
             this->connectionReadyCallback(descriptor); // callback connection ready function
             foundConnection->SetConnectionState(ConnectionState::ESTABLISHED);
+            foundConnection->InitCongestionState(MAX_PACKET_LENGTH * 10, MAX_PACKET_LENGTH * 100);
             if (!_recPktAdded) { // Add to rec pkt
                 foundConnection->addRecPkt(recPkt);
                 _recPktAdded = true;
@@ -463,7 +506,6 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
             if (!foundConnection->HaveReceivedPkt(_recPktNum)) {
                 break;
             }
-            
             uint64_t recPktNum = recPkt->GetPktNum();
             uint64_t _usePktNum = foundConnection->GetNewPktNum();
             std::shared_ptr<payload::Initial> initHdr = std::make_shared<payload::Initial>(4, 1, localConID, remoteConID, _usePktNum);
@@ -501,7 +543,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
     }
     case(payload::PacketType::ONE_RTT): {
 
-        // utils::logger::warn("Receive a ONE-RTT packet with packet number = {}", _recPktNum);
+        utils::logger::warn("Receive a ONE-RTT packet with packet number = {}", _recPktNum);
         std::shared_ptr<payload::ShortHeader> shHdr = std::dynamic_pointer_cast<payload::ShortHeader>(hdr);
         auto frames = recPld->GetFrames();
         // utils::logger::info("Got frames, number = {}", frames.size());
@@ -557,21 +599,23 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 if (_nowStream.WhetherTpUper(bufOffset)) {
                     this->streamDataReadyCallback(conSeq, streamID, std::move(buf), buflen, (bool)fin);
                     _nowStream.UpdateExpOffset(buflen);
-                    std::pair<std::unique_ptr<uint8_t[]>, uint64_t> _bufStreamInfo;
+                    std::pair<std::unique_ptr<uint8_t[]>, std::pair<uint64_t, bool>> _bufStreamInfo;
                     while (true) {
                         _bufStreamInfo = _nowStream.GetBufferedStream();
                         if (_bufStreamInfo.first == nullptr) {
                             break;
                         }
-                        bool _nowfin = _nowStream.GetAndPopBufferedFin();
+                        bool _nowfin = _bufStreamInfo.second.second;
+                        // bool _nowfin = _nowStream.GetAndPopBufferedFin();
                         this->streamDataReadyCallback(conSeq, streamID, 
-                                    std::move(_bufStreamInfo.first), _bufStreamInfo.second, _nowfin);
+                                    std::move(_bufStreamInfo.first), _bufStreamInfo.second.first, _nowfin);
                     }
                 } else {
                     utils::logger::warn("Got a disorder stream frame.");
-                    _nowStream.UpdateExpOffset(buflen);
+                    // _nowStream.UpdateExpOffset(buflen);
                     _nowStream.AddToBufferedFin((bool)fin);
                     _nowStream.AddToBufferedStream(std::move(buf), bufOffset, buflen);
+                    utils::logger::warn("Buffered stream packet number = {}", _nowStream.GetBufferedStreamLength());
                 }
                 // utils::logger::info("Going to callback!");
                 // this->streamDataReadyCallback(conSeq, streamID, std::move(buf), buflen, (bool)fin);
@@ -644,7 +688,8 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 utils::IntervalSet inS = foundCon->getNeedACKRecPkt();
                 inS.AddInterval(recPkt->GetPktNum(), recPkt->GetPktNum());
                 uint64_t _usePktNum = foundCon->GetNewPktNum();
-                std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(1, 
+                uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
+                std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
                                                     foundCon->getRemoteConnectionID(), _usePktNum);
                 std::shared_ptr<payload::ACKFrame> _sentACKFrm = std::make_shared<payload::ACKFrame>(0, 
                                                                     inS);
@@ -664,12 +709,12 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 const ConnectionID& localConID = shHdr->GetDstID();
                 
                 std::shared_ptr<Connection> foundCon = nullptr;
-                uint64_t conSeq;
+                // uint64_t conSeq;
                 for (auto con: this->connections) {
                     if (con.second->GetConnectionState() != ConnectionState::CLOSED &&
                         (con.second->getLocalConnectionID() == localConID)) {
                         foundCon = con.second;
-                        conSeq = con.first;
+                        // conSeq = con.first;
                         break;
                     }
                 }

@@ -95,7 +95,7 @@ class QUIC {
     int SetStreamDataReadyCallback(uint64_t descriptor, uint64_t streamID,
                                    StreamDataReadyCallbackType callback);
 
-    int SetLocalStream(uint64_t descriptor, uint64_t streamID) {};
+    int SetLocalStream([[maybe_unused]] uint64_t descriptor, [[maybe_unused]] uint64_t streamID) { return 0; };
 
     int SocketLoop();
 
