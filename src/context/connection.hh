@@ -33,7 +33,7 @@ enum class ConnectionState {
 int INITIAL_RTT = 500;//msec
 int kPacketThreshold = 3;
 float kTimeThreshold = (9/8);
-int kGranualarity = 1;//msec
+int kGranularity = 1;//msec
 // int INITIAL_SPACE = 0;
 // int HANDSHAKE_SPACE = 1;
 // int APPLICATIONDATA_SPACE = 2;
@@ -42,6 +42,11 @@ struct ACKTimer {
    uint64_t pktNum;
    uint64_t remTime;
    uint64_t idx;
+};
+
+struct PTOTimer {
+    uint64_t pktNum;
+    uint64_t PTO_expire_time;
 };
 
 class Stream {
@@ -137,7 +142,7 @@ class Connection {
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
         // TODO::what is reset of loss_detection_timer??
-        loss_detection_timer_msec = curTime.tv_sec * 1000;
+        loss_detection_timer_msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
         latest_rtt = 0;
         smoothed_rtt = INITIAL_RTT;
         rtt_var = INITIAL_RTT / 2;
@@ -303,14 +308,14 @@ class Connection {
         
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
-        uint64_t msec = curTime.tv_usec; // / 1000;
+        uint64_t msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;curTime.tv_usec; // / 1000;
         this->notACKedRecPkt.push_back(ACKTimer{pn, msec, _recIdx});
         // utils::logger::info("In add to need ack pkt");
     }
 
     void addNeedACKSentPkt(std::shared_ptr<payload::Packet> needACKPkt) {
         uint64_t pn = needACKPkt->GetPktNum();
-        // ADD to the received package vector
+        // ADD to the sent package vector
         // this->recPkt.push_back(needACKPkt);
         // uint64_t idx = this->recPkt.size();
         // GET the rem time that is needed for the ACKTimer construction
@@ -323,9 +328,9 @@ class Connection {
         
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
-        uint64_t msec = curTime.tv_sec * 1000; // / 1000;
+        uint64_t msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
         this->notACKedSentPkt.push_back(ACKTimer{pn, msec, _sentIdx});
-        // this->notACKedSentPkt.push_back(ACKTimer{pn, MAX_RTT});
+        this->notACKedSentPktPTO.push_back(PTOTimer{pn,PTO+msec});
     }
     
     void remNeedACKPkt(utils::IntervalSet _recACKInterval) {
@@ -344,24 +349,38 @@ class Connection {
         }
         printf("\n");*/
         std::list<ACKTimer> newNotACKedSentPkt;
+        std::list<PTOTimer> newNotACKedSentPktPTO;
         std::map<uint64_t,uint64_t> newlatestACKedSentPktNum;
         newNotACKedSentPkt.clear();
+        newNotACKedSentPktPTO.clear();
         newlatestACKedSentPktNum.clear();
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
-        uint64_t msec = curTime.tv_sec * 1000; // / 1000;
+        uint64_t msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
         utils::IntervalSet _addedToNewACKedPktNum;
+        int count = 0;
         for (auto _nns: this->notACKedSentPkt) {
             if (!_recACKInterval.Contain(_nns.pktNum) && !_addedToNewACKedPktNum.Contain(_nns.pktNum)) {
                 newNotACKedSentPkt.push_back(ACKTimer{_nns.pktNum, msec, _nns.idx});
                 _addedToNewACKedPktNum.AddInterval(_nns.pktNum, _nns.pktNum);
+                int iterator_count = 0;
+                for(auto _nnsPTO: this->notACKedSentPktPTO) {
+                    if(iterator_count==count) {
+                        newNotACKedSentPktPTO.push_back(_nnsPTO);                        
+                        break;
+                    }
+                    iterator_count++;
+                }
             } else {
                 // printf("%d ", _nns.pktNum);
                 newlatestACKedSentPktNum[_nns.pktNum] = _nns.remTime;
             }
+            count++;
         }
         this->notACKedSentPkt.clear();
         this->notACKedSentPkt = newNotACKedSentPkt;
+        this->notACKedSentPktPTO.clear();
+        this->notACKedSentPktPTO = newNotACKedSentPktPTO;
         /*
         printf("For remained not acked sent packets: \n");
         for (auto _newNotACKPkt: this->notACKedSentPkt) {
@@ -423,7 +442,7 @@ class Connection {
         utils::IntervalSet _notACKInS;
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
-        uint64_t msec = curTime.tv_usec; // / 1000;
+        uint64_t msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
         std::list<ACKTimer> newNotACKedRecPkt;
         for (auto _notACKPkt: this->notACKedRecPkt) {
             uint64_t pn = _notACKPkt.pktNum;
@@ -558,7 +577,7 @@ class Connection {
                 // TODO:: "IncludesAckEliciting(newly_acked_packets)" for case in "if" above
                 struct timeval curTime;
                 gettimeofday(&curTime,nullptr);
-                this->latest_rtt = curTime.tv_sec * 1000 - larget_new_acked_packets_sent_time;
+                this->latest_rtt = curTime.tv_sec * 1000 + curTime.tv_usec / 1000 - larget_new_acked_packets_sent_time;
                 if(first_rtt_sample == 0) {
                     min_rtt = latest_rtt;
                     smoothed_rtt = latest_rtt;
@@ -577,11 +596,24 @@ class Connection {
                 }
             }
         }
+        updatePTO();
+    }
+
+    void initPTO() {
+        this->PTO = 0;
+    }
+
+    void updatePTO() {
+        this->PTO =  this->smoothed_rtt + max(4*rtt_var, kGranularity) + latest_rtt;
     }
 
     uint64_t getConnectionRTT() {
         return this->latest_rtt;
     }
+
+    std::list<PTOTimer> GetPTOTimers() {
+        return this->notACKedSentPktPTO;
+    }    
 
 
 
@@ -617,6 +649,7 @@ class Connection {
     std::list<ACKTimer> notACKedRecPkt;
     std::list<ACKTimer> notACKedSentPkt;
     std::map<uint64_t,uint64_t> latestACKedSentPktNum;
+    std::list<PTOTimer> notACKedSentPktPTO;
     
 
     utils::IntervalSet tmpRecACKInterval;
@@ -634,6 +667,9 @@ class Connection {
     uint64_t first_rtt_sample;
     uint64_t larget_acked_packet;
     uint64_t loss_time;
+
+    //PTO related
+    uint64_t  PTO; // = smoothed_rtt + max(4*rtt_var, kGranularity) + max_ack_delay
 };
 
 uint64_t Connection::connectionDescriptor = 0;

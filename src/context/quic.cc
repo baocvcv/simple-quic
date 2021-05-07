@@ -193,6 +193,35 @@ int QUIC::SocketLoop() {
         // if (datagram) {
         //     this->incomingMsg(std::move(datagram));
         // }
+
+        bool PTO_expired = false;
+
+        // deal with if PTO expired
+        struct timeval curTime;
+        gettimeofday(&curTime, nullptr);
+        uint64_t current_time = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
+        for(auto& connection : this->connections) {
+            std::list<PTOTimer> connection_PTO_timers = connection.second->GetPTOTimers();
+            int count = 0;
+            for(auto PTO_timer : connection_PTO_timers) {
+                if(current_time > PTO_timer.PTO_expire_time) {
+                    PTO_expired = true;
+                    connection.second->updatePTO();
+
+                    auto& pendingPackets = connection.second->GetPendingPackets();
+                    // SEND regular packets
+                    if (!pendingPackets.empty()) {
+                        // append 1 packet that need ack
+                        
+                    }
+                    else {
+
+                    }
+                }
+            }
+        }
+
+
         // send packages
         for (auto& connection : this->connections) {
             // utils::logger::info("Now going to print the sent but not acked packets and rec but not acked packets");
@@ -245,7 +274,7 @@ int QUIC::SocketLoop() {
             struct timeval curTime;
             gettimeofday(&curTime, nullptr);
             // uint64_t makes sure this is a positive number
-            uint64_t msec = curTime.tv_sec * 1000;
+            uint64_t msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
 
             // /* add needResendPkts to the end of pendingPackets */
             // auto notAckedSentPkt = connection.second->GetNotACKedSentPkt();
@@ -356,6 +385,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
             connection->SetSrcConnectionID(localConID);
             utils::logger::warn("[Connection {}] allocate local ID {}", conDes, localConID.ToString());
             connection->SetDstConnectionID(expRemoteID);
+            connection->initPTO();
             utils::logger::warn("[Connection {}] peer ID exchanged,local: {}, remote: {}", conDes, localConID.ToString(), remoteConID.ToString());
             this->connections[conDes] = connection;
             // payload::Initial initHdr;
@@ -383,7 +413,6 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
             pld->AttachFrame(ackFrm);
             std::shared_ptr<payload::Packet> pkt = std::make_shared<payload::Packet>(initHdr, pld, datagram->GetAddrSrc());
             connection->AddPacket(pkt);
-            // connection->addNeedACKSentPkt(pkt);
             connection->AddWhetherNeedACK(true);
             
             connection->SetConnectionState(ConnectionState::PEER_ESTABLISHED);
@@ -708,6 +737,10 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
         break;
     }
     
+    /* Check if PTO expired */
+
+
+
     /*
     if (hdr->Type() == payload::PacketType::INITIAL) {
         std::shared_ptr<payload::Initial> initHdr = std::dynamic_pointer_cast<payload::Initial>(hdr);
