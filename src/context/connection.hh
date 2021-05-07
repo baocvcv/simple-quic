@@ -13,6 +13,8 @@ namespace thquic::context {
 
 constexpr uint64_t MAX_STREAM_NUM = 32;
 constexpr uint64_t MAX_CONNECTION_NUM = 1000;
+constexpr uint64_t MAX_PACKET_LENGTH = 1080; // SET maximum packet length to 1000 (Bytes?)
+constexpr uint64_t MAX_PACKET_DATA_LENGTH = 1024;
 
 enum class StreamState {
     UNDEFINED,
@@ -26,6 +28,12 @@ enum class ConnectionState {
     PEER_ESTABLISHED,
     WAIT_FOR_PEER_CLOSE,
     CLOSED,   // sec 17.2.3
+};
+
+enum class CongestionState {
+    SLOW_START,
+    RECOVERY,
+    CONGESTION_AVOIDANCE,
 };
 
 // const int MAX_ACK_DELAY = 25;
@@ -42,6 +50,7 @@ struct ACKTimer {
    uint64_t pktNum;
    uint64_t remTime;
    uint64_t idx;
+   uint64_t pktLen; // Bytes?
 };
 
 struct PTOTimer {
@@ -53,7 +62,7 @@ class Stream {
     public:
         Stream() { myState = StreamState::UNDEFINED; }
         Stream(uint64_t _streamID, StreamState _state) {
-            this->streamID = streamID;
+            this->streamID = _streamID;
             this->myState = _state;
         }
 
@@ -87,7 +96,8 @@ class Stream {
             this->expOffset += recBufLen;
         }
 
-        void AddToBufferedStream(std::unique_ptr<uint8_t[]> recBuf, uint64_t recBufOffset, uint64_t recBufLen) {
+        void AddToBufferedStream(std::unique_ptr<uint8_t[]> recBuf, uint64_t recBufOffset, 
+                                    uint64_t recBufLen) {
             this->bufferedStream.push_back(std::move(recBuf));
             this->bufferedOffset.push_back(recBufOffset);
             this->bufferedLen.push_back(recBufLen);
@@ -97,25 +107,54 @@ class Stream {
             this->bufferedFin.push_back(_fin);
         }
 
-        std::pair<std::unique_ptr<uint8_t[]>, uint64_t> GetBufferedStream() {
+        std::pair<std::unique_ptr<uint8_t[]>, std::pair<uint64_t, bool> > GetBufferedStream() {
+            if (this->bufferedStream.size() == 0){
+                return std::make_pair(nullptr, std::make_pair(0, false));
+            }
+            uint ofs = 0;
+            for (auto _bufOfs: this->bufferedOffset) {
+                if (this->expOffset == _bufOfs) {
+                    break;
+                }
+                ofs += 1;
+            }
+            if (ofs == this->bufferedOffset.size()) {
+                return std::make_pair(nullptr, std::make_pair(0, false));
+            }
+            uint64_t _rtBufLen = this->bufferedLen[ofs];
+            std::unique_ptr<uint8_t[]> _rtBuffer = std::move(this->bufferedStream[ofs]);
+            this->expOffset += _rtBufLen;
+            bool _rtFin = this->bufferedFin[ofs];
+            // REMOVE returned buffer and relevant attributes
+            this->bufferedStream.erase(this->bufferedStream.begin() + ofs);
+            this->bufferedLen.erase(this->bufferedLen.begin() + ofs);
+            this->bufferedOffset.erase(this->bufferedOffset.begin() + ofs);
+            this->bufferedFin.erase(this->bufferedFin.begin() + ofs);
+            return std::make_pair(std::move(_rtBuffer), std::make_pair(_rtBufLen, _rtFin));
+            /*
             if (this->bufferedStream.size() == 0 || 
                 this->expOffset != this->bufferedOffset.front()) {
                     return std::make_pair(nullptr, 0);
                 }
             uint64_t _rtBufLen = this->bufferedLen.front();
+            this->expOffset += _rtBufLen;
             this->bufferedLen.pop_front();
             this->bufferedOffset.pop_front();
+            
             std::unique_ptr<uint8_t[]> _rtBuffer = std::move(this->bufferedStream.front());
             this->bufferedStream.pop_front();
-            return std::make_pair(std::move(_rtBuffer), _rtBufLen);
+            return std::make_pair(std::move(_rtBuffer), _rtBufLen);*/
         }
 
         bool GetAndPopBufferedFin() {
             bool _rtfin = this->bufferedFin.front();
-            this->bufferedFin.pop_front();
+            // this->bufferedFin.pop_front();
             return _rtfin;
         }
         
+        uint64_t GetBufferedStreamLength() {
+            return this->bufferedStream.size();
+        }
 
     private:
         uint64_t streamID;
@@ -124,10 +163,10 @@ class Stream {
         bool bidirectional;
         uint64_t _offset = 0;
         uint64_t expOffset = 0;
-        std::list<std::unique_ptr<uint8_t[]> > bufferedStream;
-        std::list<uint64_t> bufferedOffset;
-        std::list<uint64_t> bufferedLen;
-        std::list<bool> bufferedFin;
+        std::vector<std::unique_ptr<uint8_t[]> > bufferedStream;
+        std::vector<uint64_t> bufferedOffset;
+        std::vector<uint64_t> bufferedLen;
+        std::vector<bool> bufferedFin;
 };
 
 class Connection {
@@ -148,7 +187,7 @@ class Connection {
         rtt_var = INITIAL_RTT / 2;
         min_rtt = 0;
         first_rtt_sample = 0;
-        larget_acked_packet = INFINITY;
+        larget_acked_packet = 0xffffffffUL;
     }
 
     void SetConnectionState(ConnectionState _sta) {
@@ -308,8 +347,8 @@ class Connection {
         
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
-        uint64_t msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;curTime.tv_usec; // / 1000;
-        this->notACKedRecPkt.push_back(ACKTimer{pn, msec, _recIdx});
+        uint64_t msec = curTime.tv_usec; // / 1000;
+        this->notACKedRecPkt.push_back(ACKTimer{pn, msec, _recIdx, needACKPkt->EncodeLen()});
         // utils::logger::info("In add to need ack pkt");
     }
 
@@ -328,9 +367,11 @@ class Connection {
         
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
-        uint64_t msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
-        this->notACKedSentPkt.push_back(ACKTimer{pn, msec, _sentIdx});
-        this->notACKedSentPktPTO.push_back(PTOTimer{pn,PTO+msec});
+        uint64_t msec = curTime.tv_sec * 1000; // / 1000;
+        this->notACKedSentPkt.push_back(ACKTimer{pn, msec, _sentIdx, needACKPkt->EncodeLen()});
+        uint64_t msec_pto = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
+        this->notACKedSentPktPTO.push_back(PTOTimer{pn,PTO+msec_pto});
+        // this->notACKedSentPkt.push_back(ACKTimer{pn, MAX_RTT});
     }
     
     void remNeedACKPkt(utils::IntervalSet _recACKInterval) {
@@ -359,9 +400,13 @@ class Connection {
         uint64_t msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
         utils::IntervalSet _addedToNewACKedPktNum;
         int count = 0;
+        utils::IntervalSet _addedToLastestNeedAckPktNum;
+        bool _isPacketMiss = false;
+        bool _haveNotACKed = false;
+        bool _haveNewACKed = false;
         for (auto _nns: this->notACKedSentPkt) {
             if (!_recACKInterval.Contain(_nns.pktNum) && !_addedToNewACKedPktNum.Contain(_nns.pktNum)) {
-                newNotACKedSentPkt.push_back(ACKTimer{_nns.pktNum, msec, _nns.idx});
+                newNotACKedSentPkt.push_back(ACKTimer{_nns.pktNum, msec, _nns.idx, _nns.pktLen});
                 _addedToNewACKedPktNum.AddInterval(_nns.pktNum, _nns.pktNum);
                 int iterator_count = 0;
                 for(auto _nnsPTO: this->notACKedSentPktPTO) {
@@ -371,9 +416,20 @@ class Connection {
                     }
                     iterator_count++;
                 }
-            } else {
+            } else if (!_addedToNewACKedPktNum.Contain(_nns.pktNum)) {
                 // printf("%d ", _nns.pktNum);
                 newlatestACKedSentPktNum[_nns.pktNum] = _nns.remTime;
+                _addedToNewACKedPktNum.AddInterval(_nns.pktNum, _nns.pktNum);
+                if (_haveNotACKed && !_haveNewACKed) {
+                    _isPacketMiss = true;
+                }
+                _haveNewACKed = true;
+                if (this->curState == ConnectionState::ESTABLISHED) {
+                    if (this->onFlight > _nns.pktLen)
+                        this->onFlight -= _nns.pktLen; // DECREASE the onflight packet size;
+                    else this->onFlight = 0;
+                    this->UpdateCongestionWindowByACK(_nns.pktLen); // UPDATE congestionWindow based on the current congestionState;
+                }
             }
             count++;
         }
@@ -381,6 +437,19 @@ class Connection {
         this->notACKedSentPkt = newNotACKedSentPkt;
         this->notACKedSentPktPTO.clear();
         this->notACKedSentPktPTO = newNotACKedSentPktPTO;
+
+        if (_isPacketMiss && this->curState == ConnectionState::ESTABLISHED) {
+            this->PacketMissCallback(); // SET the congestionThreshold to the half of the current congestionWindow; SET congestionWindow to MAX_PACKET_LENGTH; SET congestionState;
+        }
+        if (!_haveNewACKed && _haveNotACKed && this->curState == ConnectionState::ESTABLISHED) {
+            this->threeTimesACK += 1;
+            utils::logger::info("Got a disordered ACK packet.");
+            // IF you are confident of your implementation, >= can be safely changed to ==;
+            if (this->threeTimesACK >= 13) {
+                this->ThreeTimeNoNewACKCallback(); // SET congestionThreshold and congestionWindow to half value of current congestionWindow;
+                this->threeTimesACK = 0;
+            }
+        }
         /*
         printf("For remained not acked sent packets: \n");
         for (auto _newNotACKPkt: this->notACKedSentPkt) {
@@ -458,6 +527,7 @@ class Connection {
         }
         std::shared_ptr<payload::ACKFrame> _ackFrm = std::make_shared<payload::ACKFrame>(latest_rtt, 
                                                             _notACKInS);
+        
         // uint64_t _usePktNum = this->GetNewPktNum();
         std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(1, 
                                                     this->getRemoteConnectionID(), 0);
@@ -541,17 +611,17 @@ class Connection {
 
     void PrintSentNeedACKPktNum() {
         // utils::logger::info("Now print the packet numbers for those sent packets which have not been acked");
-        for (auto _notAckedPkt: this->notACKedSentPkt) {
+        // for (auto _notAckedPkt: this->notACKedSentPkt) {
             // printf("%d ", _notAckedPkt.pktNum);
-        }
+        // }
         // printf("\n");
     }
 
     void PrintRecNotACKPktNum() {
         // utils::logger::info("Now print the packet numbers for those received packets which have not been acked");
-        for (auto _notAckedPkt: this->notACKedRecPkt) {
+        // for (auto _notAckedPkt: this->notACKedRecPkt) {
             // printf("%d ", _notAckedPkt.pktNum);
-        }
+        // }
         // printf("\n");
     }
 
@@ -615,6 +685,112 @@ class Connection {
         return this->notACKedSentPktPTO;
     }    
 
+    void InitCongestionState(uint64_t _initCW, uint64_t _initThreshold) {
+        this->congestionWindow = _initCW;
+        this->congestionThreshold = _initThreshold;
+        this->congestionState = CongestionState::SLOW_START;
+        this->onFlight = 0;
+        this->threeTimesACK = 0;
+    }
+
+    void PacketMissCallback() {
+        this->congestionThreshold = this->congestionWindow / 2;
+        this->congestionWindow = MAX_PACKET_LENGTH;
+        this->congestionState = CongestionState::SLOW_START;
+    }
+
+    void UpdateCongestionWindowByACK(uint64_t _recACKPktLen) {
+        utils::logger::info("Updating cw by ack length = {}, cw = {}", _recACKPktLen, 
+                            this->congestionWindow);
+        if (this->congestionState == CongestionState::SLOW_START) {
+            this->congestionWindow += _recACKPktLen;
+            if (this->congestionWindow > this->congestionThreshold) {
+                this->congestionState = CongestionState::CONGESTION_AVOIDANCE;
+            }
+        } else {
+            this->congestionWindow += (MAX_PACKET_LENGTH) * (_recACKPktLen / this->congestionWindow);
+        }
+    }
+
+    void UpdateOnFlightBySentPktLen(uint64_t _sentPktLen) {
+        if (this->curState != ConnectionState::ESTABLISHED) {
+            return;
+        }
+        this->onFlight += _sentPktLen;
+        // if (this->onFlight > this->congestionThreshold) {
+            // ENTER congestion avoidance state;
+        //     this->congestionState = CongestionState::CONGESTION_AVOIDANCE; 
+        // }
+    }
+
+    bool WhetherCanSendPkt(uint64_t _toSendPktLen) {
+        // utils::logger::info("On flight pkt length = {}, to send pkt num = {}, congestion window = {}", 
+        //                     this->onFlight, _toSendPktLen, this->congestionWindow);
+        return (this->curState != ConnectionState::ESTABLISHED) || (this->onFlight + _toSendPktLen < this->congestionWindow);
+    }
+
+    void ThreeTimeNoNewACKCallback() {
+        utils::logger::info("Receive same ack range for three times, cw = {}", 
+                            this->congestionWindow);
+        this->congestionWindow = this->congestionWindow / 2;
+        this->congestionThreshold = this->congestionWindow;
+    }
+
+    void AddToUnsentBuf(std::unique_ptr<uint8_t[]> _unsentBuf, uint64_t _sID, uint64_t _buflen, bool FIN) {
+        this->unsentBuf.push_back(std::move(_unsentBuf));
+        this->unsentBufStreamID.push_back(_sID);
+        this->unsentBufLen.push_back(_buflen);
+        this->unsentBufFin.push_back(FIN);
+    }
+
+    std::shared_ptr<payload::Packet> GetPktFromUnsentBuf() {
+        if (this->unsentBuf.size() == 0) {
+            return nullptr;
+        }
+        std::unique_ptr<uint8_t[]> tmpBuf = std::move(this->unsentBuf[0]);
+        uint8_t* tmpBufArr = tmpBuf.get();
+        uint64_t tmpBufLen = this->unsentBufLen[0];
+        uint64_t toSendBufLen = min(tmpBufLen, MAX_PACKET_DATA_LENGTH);
+        // uint8_t toSendBuf[MAX_PACKET_DATA_LENGTH];
+        std::unique_ptr<uint8_t[]> toSendBuf = std::make_unique<uint8_t[]>(toSendBufLen);
+        
+        memcpy(toSendBuf.get(), tmpBufArr, toSendBufLen);
+        tmpBufLen -= toSendBufLen;
+        uint64_t strmID = this->unsentBufStreamID[0];
+        bool _fin = this->unsentBufFin[0];
+        if (tmpBufLen <= 0) {
+            this->unsentBuf.erase(this->unsentBuf.begin());
+            this->unsentBufStreamID.erase(this->unsentBufStreamID.begin());
+            this->unsentBufLen.erase(this->unsentBufLen.begin());
+            this->unsentBufFin.erase(this->unsentBufFin.begin());
+        } else {
+            tmpBufArr += toSendBufLen;
+            std::unique_ptr<uint8_t[]> aftBuf = std::make_unique<uint8_t[]>(tmpBufLen);
+            memcpy(aftBuf.get(), tmpBufArr, tmpBufLen);
+            this->unsentBuf[0] = std::move(aftBuf);
+            this->unsentBufLen[0] = tmpBufLen;
+        }
+
+        uint64_t nowOffset = this->GetStreamByID(strmID).GetUpdateOffset(toSendBufLen);
+        std::shared_ptr<payload::StreamFrame> fr = std::make_shared<payload::StreamFrame>(strmID, 
+                                                    std::move(toSendBuf), 
+                                                    toSendBufLen, 
+                                                    nowOffset, true, _fin);
+        
+        uint64_t _usePktNum = this->GetNewPktNum();
+        utils::logger::info("Sending data with packet numbeer = {}, len = {}. fin = {}", _usePktNum, 
+                            toSendBufLen, _fin);
+        uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
+        // pktNumLen | dstConID | pktNum
+        std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
+                                                        this->getRemoteConnectionID(), _usePktNum);
+        std::shared_ptr<payload::Payload> pl = std::make_shared<payload::Payload>();
+        pl->AttachFrame(fr);
+        std::shared_ptr<payload::Packet> pk = std::make_shared<payload::Packet>(shHdr, pl, 
+                                                                    this->GetSockaddrTo());
+        
+        return pk;
+    }
 
 
    private:
@@ -634,6 +810,11 @@ class Connection {
     sockaddr_in addrTo;
 
     ConnectionState curState;
+
+    std::vector<std::unique_ptr<uint8_t[]> > unsentBuf;
+    std::vector<uint64_t> unsentBufStreamID;
+    std::vector<uint64_t> unsentBufLen;
+    std::vector<bool> unsentBufFin;
 
 
     // use the same package number space ---- but need to change in the future
@@ -670,6 +851,11 @@ class Connection {
 
     //PTO related
     uint64_t  PTO; // = smoothed_rtt + max(4*rtt_var, kGranularity) + max_ack_delay
+    uint64_t congestionWindow;
+    uint64_t congestionThreshold;
+    CongestionState congestionState;
+    uint64_t onFlight;
+    uint64_t threeTimesACK;
 };
 
 uint64_t Connection::connectionDescriptor = 0;

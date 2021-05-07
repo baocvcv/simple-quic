@@ -71,6 +71,8 @@ class Server {
     int StreamDataReady(uint64_t sequence, uint64_t stream,
                         std::unique_ptr<uint8_t[]> buf, size_t len, bool fin) {
         try {
+            thquic::utils::logger::info("[APP] in stream data ready function, sequence = {}, stream = {}, len = {}, fin = {}.", 
+                                        sequence, stream, len, fin);
             if (len != 0 && !fin) {
                 std::copy(buf.get(), buf.get() + len,
                           temporaryBuffer.get() + temporaryBufferLen);
