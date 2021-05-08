@@ -41,7 +41,7 @@ enum class CongestionState {
 int INITIAL_RTT = 500;//msec
 int kPacketThreshold = 3;
 float kTimeThreshold = (9/8);
-int kGranularity = 1;//msec
+uint64_t kGranularity = 1;//msec
 // int INITIAL_SPACE = 0;
 // int HANDSHAKE_SPACE = 1;
 // int APPLICATIONDATA_SPACE = 2;

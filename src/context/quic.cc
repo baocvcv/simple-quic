@@ -203,33 +203,9 @@ int QUIC::SocketLoop() {
         // if (datagram) {
         //     this->incomingMsg(std::move(datagram));
         // }
-
-        bool PTO_expired = false;
-
-        // deal with if PTO expired
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
         uint64_t current_time = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
-        for(auto& connection : this->connections) {
-            std::list<PTOTimer> connection_PTO_timers = connection.second->GetPTOTimers();
-            int count = 0;
-            for(auto PTO_timer : connection_PTO_timers) {
-                if(current_time > PTO_timer.PTO_expire_time) {
-                    PTO_expired = true;
-                    connection.second->updatePTO();
-
-                    auto& pendingPackets = connection.second->GetPendingPackets();
-                    // SEND regular packets
-                    if (!pendingPackets.empty()) {
-                        // append 1 packet that need ack
-                        
-                    }
-                    else {
-
-                    }
-                }
-            }
-        }
 
 
         // send packages
@@ -240,9 +216,48 @@ int QUIC::SocketLoop() {
             // connection.second->PrintRecNotACKPktNum();
             auto& pendingPackets = connection.second->GetPendingPackets();
             int sentWhenCongested = 0;
+
+            // deal with if PTO expired
+            bool PTO_expired = false;
+            for(auto& connection : this->connections) {
+                std::list<PTOTimer> connection_PTO_timers = connection.second->GetPTOTimers();
+                for(auto PTO_timer : connection_PTO_timers) {
+                    if(current_time > PTO_timer.PTO_expire_time) {
+                        PTO_expired = true;
+                        connection.second->updatePTO();
+                    }
+                }
+            }
+            utils::logger::info("PTO_expired = {} for localConnectionID = {} and remoteConnectionID = {}",PTO_expired,connection.second->getLocalConnectionID().ToString(),connection.second->getRemoteConnectionID().ToString());                
             
+
+            // if nothing to send, send a packet with only a ping frame
+            if (pendingPackets.empty()) {
+                utils::logger::info("PendingPackets is emtpy, check the connectionState = {}",connection.second->GetConnectionState());                
+                if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
+                    connection.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
+                    connection.second->GetConnectionState() != ConnectionState::CLOSED) {
+                // send a Ping Frame
+                    uint64_t _usePktNum = connection.second->GetNewPktNum();
+                    utils::logger::info("Sending ping frame packet with packet numbeer = {}, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
+                    uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
+                    // pktNumLen | dstConID | pktNum
+                    std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
+                                                                connection.second->getRemoteConnectionID(), _usePktNum);
+                    utils::ByteStream emptyBys(nullptr, 0);
+                    std::shared_ptr<payload::Payload> pld = std::make_shared<payload::Payload>(emptyBys, 0);
+                    std::shared_ptr<payload::PingFrame> pingFrm = std::make_shared<payload::PingFrame>();
+                    pld->AttachFrame(pingFrm);
+                    std::shared_ptr<payload::Packet> pk = std::make_shared<payload::Packet>(shHdr, pld, connection.second->GetSockaddrTo());
+                    auto newDatagram = QUIC::encodeDatagram(pk);
+                    this->socket.sendMsg(newDatagram);
+                    connection.second->UpdateOnFlightBySentPktLen(pk->EncodeLen());
+                }
+            }
+
             // SEND regular packets
             // utils::logger::info("Number of pending packets = {}", pendingPackets.size());
+            int explicit_ack_packet_sent = 0;
             while (!pendingPackets.empty()) {
                 // Have been ACKed --- need not to send again
                 if (connection.second->WhetherAckedPktNum(pendingPackets.front()->GetPktNum())) {
@@ -268,24 +283,64 @@ int QUIC::SocketLoop() {
                     }
                 if (connection.second->GetPendingPackageNeedACK() == true) {
                     connection.second->addNeedACKSentPkt(pendingPackets.front());
+                    explicit_ack_packet_sent++;
+                    if(PTO_expired)
+                        break;
                 } else {
-                    connection.second->addSentPkt(pendingPackets.front());
+                    if(!PTO_expired)
+                        connection.second->addSentPkt(pendingPackets.front());
+                    else
+                        break;                    
                 }
-                // GET ack frame for the connection --- the list is then cleared ---- also reasonable...
-                // std::shared_ptr<payload::ACKFrame> _ackRecFrm = connection.second->GetACKFrameForRecPackages();
-                // If still having packages that need ACK --- attach an ack frame to the sending package.
-                // if (_ackRecFrm != nullptr)
-                //     pendingPackets.front()->GetPktPayload()->AttachFrame(_ackRecFrm);
-                auto newDatagram = QUIC::encodeDatagram(pendingPackets.front());
-                if (rand() % 10 < 8)
-                    this->socket.sendMsg(newDatagram);
-                connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
-                // UPDATE this connection's onFlight packet length;
-                if (connection.second->GetPendingPackageNeedACK() == true)
-                    connection.second->UpdateOnFlightBySentPktLen(pendingPackets.front()->EncodeLen());
-                pendingPackets.pop_front();
-                connection.second->PopWhetherNeedACK();
-                
+
+                if(PTO_expired) {
+                    if(explicit_ack_packet_sent > 0) {
+                        assert(explicit_ack_packet_sent==1);                        
+                        auto newDatagram = QUIC::encodeDatagram(pendingPackets.front());
+                        if (rand() % 10 < 8)
+                            this->socket.sendMsg(newDatagram);
+                        connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
+                        // UPDATE this connection's onFlight packet length;
+                        if (connection.second->GetPendingPackageNeedACK() == true)
+                            connection.second->UpdateOnFlightBySentPktLen(pendingPackets.front()->EncodeLen());
+                        pendingPackets.pop_front();
+                        connection.second->PopWhetherNeedACK();
+                    }
+                    else {
+                        assert(explicit_ack_packet_sent==0);
+                        // send a Ping Frame
+                        uint64_t _usePktNum = connection.second->GetNewPktNum();
+                        utils::logger::info("Sending ping frame packet with packet numbeer= {}, as the pendingPackets.front() is not explicit ack, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
+                        uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
+                        // pktNumLen | dstConID | pktNum
+                        std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
+                                                                    connection.second->getRemoteConnectionID(), _usePktNum);
+                        utils::ByteStream emptyBys(nullptr, 0);
+                        std::shared_ptr<payload::Payload> pld = std::make_shared<payload::Payload>(emptyBys, 0);
+                        std::shared_ptr<payload::PingFrame> pingFrm = std::make_shared<payload::PingFrame>();
+                        pld->AttachFrame(pingFrm);
+                        std::shared_ptr<payload::Packet> pk = std::make_shared<payload::Packet>(shHdr, pld, connection.second->GetSockaddrTo());
+                        auto newDatagram = QUIC::encodeDatagram(pk);
+                        this->socket.sendMsg(newDatagram);
+                        connection.second->UpdateOnFlightBySentPktLen(pk->EncodeLen());
+                    }
+                }
+                else {
+                    // GET ack frame for the connection --- the list is then cleared ---- also reasonable...
+                    // std::shared_ptr<payload::ACKFrame> _ackRecFrm = connection.second->GetACKFrameForRecPackages();
+                    // If still having packages that need ACK --- attach an ack frame to the sending package.
+                    // if (_ackRecFrm != nullptr)
+                    //     pendingPackets.front()->GetPktPayload()->AttachFrame(_ackRecFrm);
+                    auto newDatagram = QUIC::encodeDatagram(pendingPackets.front());
+                    if (rand() % 10 < 8)
+                        this->socket.sendMsg(newDatagram);
+                    connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
+                    // UPDATE this connection's onFlight packet length;
+                    if (connection.second->GetPendingPackageNeedACK() == true)
+                        connection.second->UpdateOnFlightBySentPktLen(pendingPackets.front()->EncodeLen());
+                    pendingPackets.pop_front();
+                    connection.second->PopWhetherNeedACK();
+                }
             }
 
             if (connection.second->GetConnectionState() == ConnectionState::CLOSED) {
@@ -582,7 +637,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
             nowIdx += 1;
             if (frm->Type() == payload::FrameType::STREAM) {
                 // STREAM Frame
-                // utils::logger::info("Got a stream frame from the one-rtt packet.");
+                utils::logger::info("Got a stream frame from the one-rtt packet.");
                 std::shared_ptr<payload::StreamFrame> streamFrm = std::dynamic_pointer_cast<payload::StreamFrame>(frm);
                 uint64_t streamID = streamFrm->StreamID();
                 const ConnectionID& localConID = shHdr->GetDstID();
@@ -774,7 +829,35 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 // utils::logger::warn("Going to remove ACKed sent packets from the connection");
                 foundCon->remNeedACKPkt(_recACKInS); // remove the sent packages that need ACK.
                 foundCon->AddAckedSentPktNum(_recACKInS);
-            }
+            } else if (frm->Type() == payload::FrameType::PING) {
+                utils::logger::info("Got a ping frame from the one-rtt packet.");
+                std::shared_ptr<payload::PingFrame> pingFrm = std::dynamic_pointer_cast<payload::PingFrame>(frm);
+                const ConnectionID& localConID = shHdr->GetDstID();
+                utils::logger::info("Got a ping frame from the one-rtt packet, DstID = {}",localConID.ToString());
+                std::shared_ptr<Connection> foundCon = nullptr;
+                uint64_t conSeq;
+                for (auto con: this->connections) {
+                    if (con.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
+                        con.second->GetConnectionState() != ConnectionState::CLOSED &&
+                        con.second->getLocalConnectionID() == localConID) {
+                        foundCon = con.second;
+                        conSeq = con.first;
+                        break;
+                    }
+                }
+                assert(foundCon != nullptr);
+                utils::logger::info("In Ping frame with the pkt number = {}", _recPktNum);
+                if (foundCon->HaveReceivedPkt(_recPktNum)) {
+                    utils::logger::info("Haved received the Ping packet = {}", _recPktNum);
+                    break;
+                }
+                utils::logger::info("In Ping frame with the pkt number = {} not rec yet", _recPktNum);
+                // ADD the received packet to need ACK packet list
+                if (!haveAddedToACK) {
+                    foundCon->addNeedACKRecPkt(recPkt);
+                    haveAddedToACK = true;
+                }                
+            } 
         }
         break;
     }
