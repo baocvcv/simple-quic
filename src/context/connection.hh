@@ -42,7 +42,7 @@ int INITIAL_RTT = 500;//msec
 int kPacketThreshold = 3;
 float kTimeThreshold = (9/8);
 uint64_t kGranularity = 100;//msec
-uint64_t IDLE_TIMEOUT_TIME = 10*1000; // msec => 10s
+uint64_t IDLE_TIMEOUT_TIME = 10;//*1000; // msec => 10s
 // int INITIAL_SPACE = 0;
 // int HANDSHAKE_SPACE = 1;
 // int APPLICATIONDATA_SPACE = 2;

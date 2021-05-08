@@ -229,8 +229,8 @@ int QUIC::SocketLoop() {
                     }
                 }
             }
-            utils::logger::info("PTO_expired = {} for localConnectionID = {} and remoteConnectionID = {}",PTO_expired,connection.second->getLocalConnectionID().ToString(),connection.second->getRemoteConnectionID().ToString());                
-            utils::logger::info("PTO_expired = {}, pendingPackets.empyt? = {}",PTO_expired,pendingPackets.empty());                
+            // utils::logger::info("PTO_expired = {} for localConnectionID = {} and remoteConnectionID = {}",PTO_expired,connection.second->getLocalConnectionID().ToString(),connection.second->getRemoteConnectionID().ToString());                
+            // utils::logger::info("PTO_expired = {}, pendingPackets.empyt? = {}",PTO_expired,pendingPackets.empty());                
             
 
             // deferring and dealing with idle timeout
@@ -239,7 +239,6 @@ int QUIC::SocketLoop() {
                 if(notAckedSentPkt.size() > 0) {                    
                     // defer idel timeout, send a PING packet
                     if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
-                        connection.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
                         connection.second->GetConnectionState() != ConnectionState::CLOSED) {
                         utils::logger::debug("client idle timeout and need to defer");                
                         // send a Ping Frame
@@ -265,7 +264,6 @@ int QUIC::SocketLoop() {
                     // idle timeout, send a CONNECTION_CLOSE frame immediately
                     if( type == PeerType::CLIENT &&
                         connection.second->GetConnectionState() != ConnectionState::CREATED &&
-                        connection.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
                         connection.second->GetConnectionState() != ConnectionState::CLOSED) {
                         utils::logger::debug("client idle timeout and do not need to defer");                
                         this->CloseConnection(connection_descriptor,"Idle Timeout",1);
@@ -277,9 +275,8 @@ int QUIC::SocketLoop() {
 
             // if nothing to send, send a packet with only a ping frame
             if ((PTO_expired) && (pendingPackets.empty() || connection.second->GetPendingPackageNeedACK() == false)) {
-                utils::logger::info("PendingPackets is emtpy, check the connectionState = {}",connection.second->GetConnectionState());                
+                // utils::logger::info("PendingPackets is emtpy, check the connectionState = {}",connection.second->GetConnectionState());                
                 if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
-                    connection.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
                     connection.second->GetConnectionState() != ConnectionState::CLOSED) {
                     // send a Ping Frame
                     uint64_t _usePktNum = connection.second->GetNewPktNum();
@@ -305,7 +302,7 @@ int QUIC::SocketLoop() {
             // utils::logger::info("Number of pending packets = {}", pendingPackets.size());
             int explicit_ack_packet_sent = 0;
             while (!pendingPackets.empty()) {
-                utils::logger::info("PendingPackets is not emtpy, check the connectionState = {}",connection.second->GetConnectionState());                
+                // utils::logger::info("PendingPackets is not emtpy, check the connectionState = {}",connection.second->GetConnectionState());                
                 // Have been ACKed --- need not to send again
                 if (connection.second->WhetherAckedPktNum(pendingPackets.front()->GetPktNum())) {
                     connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
@@ -722,6 +719,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 std::shared_ptr<Connection> foundCon = nullptr;
                 uint64_t conSeq;
                 for (auto con: this->connections) {
+                    utils::logger::info("localConID = {}, con.second.conID = {}",localConID.ToString(),con.second->getLocalConnectionID().ToString());                    
                     if (con.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
                         con.second->GetConnectionState() != ConnectionState::CLOSED &&
                         con.second->getLocalConnectionID() == localConID) {
