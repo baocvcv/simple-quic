@@ -20,7 +20,7 @@ constexpr uint64_t MAX_PACKET_DATA_LENGTH = 1024;
 constexpr uint64_t MAX_STREAM_OFFSET = 10240;
 constexpr uint64_t MAX_CONNECTION_SIZE = MAX_STREAM_NUM * MAX_STREAM_OFFSET;
 
-constexpr float FLOW_CONTROL_THRESH = 0.8;
+constexpr float FLOW_CONTROL_THRESH = 0.5;
 
 enum class StreamState {
     UNDEFINED,
@@ -86,14 +86,6 @@ class Stream {
             return this->myState;
         }
 
-        void SetMaxSendOffset(uint64_t _max_offset) {
-            this->max_send_offset = _max_offset;
-        }
-
-        bool IsSendPermitted(uint64_t sentBufLen) {
-            return this->_offset + sentBufLen <= this->max_send_offset;
-        }
-
         uint64_t GetUpdateOffset(uint64_t sentBufLen) {
             uint64_t nowOffset = this->_offset;
             this->_offset += sentBufLen;
@@ -102,14 +94,6 @@ class Stream {
 
         bool WhetherTpUper(uint64_t recOffset) {
             return this->expOffset == recOffset;
-        }
-
-        void SetMaxRecvOffset(uint64_t _max_offset) {
-            this->max_recv_offset = _max_offset;
-        }
-
-        bool IsRecPermitted(uint64_t off, uint64_t recBufLen) {
-            return off + recBufLen <= this->max_recv_offset;
         }
 
         void UpdateExpOffset(uint64_t recBufLen) {
@@ -180,6 +164,24 @@ class Stream {
             return {max_recv_offset, max_send_offset};
         }
 
+        void SetMaxSendOffset(uint64_t _max_offset) {
+            if (_max_offset > this->max_send_offset)
+                this->max_send_offset = _max_offset;
+        }
+
+        bool IsSendPermitted(uint64_t sendBufLen) {
+            return this->_offset + sendBufLen <= this->max_send_offset;
+        }
+
+        void SetMaxRecvOffset(uint64_t _max_offset) {
+            if (_max_offset > this->max_recv_offset)
+                this->max_recv_offset = _max_offset;
+        }
+
+        bool IsRecPermitted(uint64_t off, uint64_t recBufLen) {
+            return off + recBufLen <= this->max_recv_offset;
+        }
+
         uint64_t GetSendOffset() {
             return this->_offset;
         }
@@ -189,6 +191,9 @@ class Stream {
         }
 
         bool ShouldIncRecvLimit() {
+            // utils::logger::warn("Current stream recv offset: %lu, current thresh: %lu",
+            //     this->expOffset,
+            //     uint64_t(max_recv_offset * FLOW_CONTROL_THRESH));
             return this->expOffset >= max_recv_offset * FLOW_CONTROL_THRESH;
         }
 
@@ -227,9 +232,9 @@ class Connection {
         min_rtt = 0;
         first_rtt_sample = 0;
         larget_acked_packet = 0xffffffffUL;  
-        max_recv_stream_offset = MAX_STREAM_OFFSET;
-        max_recv_stream_offset = MAX_CONNECTION_SIZE;
-        max_recv_stream_num = MAX_STREAM_NUM;
+        // max_recv_stream_offset = MAX_STREAM_OFFSET;
+        // max_recv_stream_offset = MAX_CONNECTION_SIZE;
+        // max_recv_stream_num = MAX_STREAM_NUM;
     }
 
     void SetConnectionState(ConnectionState _sta) {
@@ -437,7 +442,6 @@ class Connection {
         // this->notACKedSentPkt.push_back(ACKTimer{pn, MAX_RTT});
     }
     
-    //TODO: read this
     void remNeedACKPkt(utils::IntervalSet _recACKInterval) {
         // REMOVE packets that have already been acked from the notACKedSentPkt
         // DO NOT need to remove it from the sentpkt
@@ -486,32 +490,34 @@ class Connection {
                 }
 
                 // update flow control params
-                //TODO: check effectiveness
-                auto pkt = this->GetSentPktByIdx(_nns.idx);
-                if (pkt->GetPacketType() == payload::PacketType::ONE_RTT) {
-                    auto hdr = std::dynamic_pointer_cast<payload::ShortHeader>(pkt->GetPktHeader());
-                    auto  recPld = pkt->GetPktPayload();
-                    for (auto frm: recPld->GetFrames()) {
-                        switch (frm->Type())
-                        {
-                        case payload::FrameType::MAX_DATA: {
-                            auto _maxDataFrm = std::dynamic_pointer_cast<payload::MaxDataFrame>(frm);
-                            this->SetMaxSendSize(_maxDataFrm->GetMaximumData());
-                            break;
-                        }
-                        case payload::FrameType::MAX_STREAM_DATA: {
-                            auto _maxDataFrm = std::dynamic_pointer_cast<payload::MaxStreamDataFrame>(frm);
-                            this->SetStreamMaxSendOffset(_maxDataFrm->StreamID(), _maxDataFrm->GetMaximumStreamData());
-                            break;
-                        }
-                        case payload::FrameType::MAX_STREAMS: {
-                            auto _maxDataFrm = std::dynamic_pointer_cast<payload::MaxStreamsFrame>(frm);
-                            this->SetMaxSendStreamNum(_maxDataFrm->GetStreamsNum());
-                            break;
-                        }
-                        }
-                    }
-                }
+                // auto pkt = this->GetSentPktByIdx(_nns.idx);
+                // if (pkt->GetPacketType() == payload::PacketType::ONE_RTT) {
+                //     auto hdr = std::dynamic_pointer_cast<payload::ShortHeader>(pkt->GetPktHeader());
+                //     auto  recPld = pkt->GetPktPayload();
+                //     for (auto frm: recPld->GetFrames()) {
+                //         switch (frm->Type())
+                //         {
+                //         case payload::FrameType::MAX_DATA: {
+                //             utils::logger::info("Updating connection max size");
+                //             auto _maxDataFrm = std::dynamic_pointer_cast<payload::MaxDataFrame>(frm);
+                //             this->SetMaxRecvSize(_maxDataFrm->GetMaximumData());
+                //             break;
+                //         }
+                //         case payload::FrameType::MAX_STREAM_DATA: {
+                //             utils::logger::info("Updating stream max size");
+                //             auto _maxDataFrm = std::dynamic_pointer_cast<payload::MaxStreamDataFrame>(frm);
+                //             this->SetStreamMaxRecvOffset(_maxDataFrm->StreamID(), _maxDataFrm->GetMaximumStreamData());
+                //             break;
+                //         }
+                //         case payload::FrameType::MAX_STREAMS: {
+                //             // ls::logger::info("Updating stream max num");
+                //             auto _maxDataFrm = std::dynamic_pointer_cast<payload::MaxStreamsFrame>(frm);
+                //             this->SetMaxRecvStreamNum(_maxDataFrm->GetStreamsNum());
+                //             break;
+                //         }
+                //         }
+                //     }
+                // }
             }
         }
         this->notACKedSentPkt.clear();
@@ -820,9 +826,22 @@ class Connection {
         uint64_t toSendBufLen = min(tmpBufLen, MAX_PACKET_DATA_LENGTH);
         uint64_t strmID = this->unsentBufStreamID[0];
         // flow control, check both stream and connection limits
-        if (!this->GetStreamByID(strmID).IsSendPermitted(toSendBufLen) 
-                || !this->IsSendPermitted(toSendBufLen)) {
+        // if (!this->GetStreamByID(strmID).IsSendPermitted(toSendBufLen) 
+        //         || !this->IsSendPermitted(toSendBufLen)) {
+        if (!this->GetStreamByID(strmID).IsSendPermitted(toSendBufLen)) {
             //TODO: optionally create an STREAM_DATA_BLOCKED frame
+            utils::logger::warn("Stream blocked!");
+            // utils::logger::info(msg, "Current send offset: %lu, current limit: %lu, trying to send: %lu",
+            //     this->GetStreamByID(strmID).GetSendOffset(),
+            //     this->GetStreamByID(strmID).GetFlowControlParams().second,
+            //     toSendBufLen);
+            this->unsentBuf[0] = std::move(tmpBuf);
+            return nullptr;
+        }
+        if (!this->IsSendPermitted(toSendBufLen)) {
+            //TODO: optionally create an STREAM_DATA_BLOCKED frame
+            utils::logger::warn("Connection blocked!");
+            this->unsentBuf[0] = std::move(tmpBuf);
             return nullptr;
         }
 
@@ -855,7 +874,7 @@ class Connection {
                                                     nowOffset, true, _fin);
         
         uint64_t _usePktNum = this->GetNewPktNum();
-        utils::logger::info("Sending data with packet numbeer = {}, len = {}. fin = {}", _usePktNum, 
+        utils::logger::info("Sending data with packet number = {}, len = {}. fin = {}", _usePktNum, 
                             toSendBufLen, _fin);
         uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
         // pktNumLen | dstConID | pktNum
@@ -870,27 +889,33 @@ class Connection {
     }
 
     void SetMaxRecvStreamOff(uint64_t max_offset) {
-        this->max_recv_stream_offset = max_offset;
+        if (max_offset > this->max_recv_stream_offset)
+            this->max_recv_stream_offset = max_offset;
     }
 
     void SetMaxSendStreamOff(uint64_t max_offset) {
-        this->max_send_stream_offset = max_offset;
+        if (max_offset > this->max_send_stream_offset)
+            this->max_send_stream_offset = max_offset;
     }
 
     void SetMaxRecvSize(uint64_t max_size) {
-        this->max_recv_size = max_size;
+        if (max_size > this->max_recv_size)
+            this->max_recv_size = max_size;
     }
 
     void SetMaxSendSize(uint64_t max_size) {
-        this->max_send_size = max_size;
+        if (max_size > this->max_send_size)
+            this->max_send_size = max_size;
     }
 
     void SetMaxRecvStreamNum(uint64_t max_num) {
-        this->max_recv_stream_num = max_num;
+        if (max_num > this->max_recv_stream_num)
+            this->max_recv_stream_num = max_num;
     }
 
     void SetMaxSendStreamNum(uint64_t max_num) {
-        this->max_send_stream_num = max_num;
+        if (max_num > this->max_send_stream_num)
+            this->max_send_stream_num = max_num;
     }
 
     std::tuple<uint64_t, uint64_t, uint64_t> GetFlowControlParams() {
@@ -906,6 +931,7 @@ class Connection {
         for (auto& e: this->streamIDToStream) {
             cur_size += e.second.GetRecvOffset();
         }
+        // utils::logger::warn(msg, "Current connection recv offset: %lu", cur_size);
         return cur_size >= max_recv_size * FLOW_CONTROL_THRESH;
     }
 

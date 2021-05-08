@@ -620,6 +620,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                         foundCon->AddPacket(pk);
                         // ACTIVE end to close the stream --- need ack
                         foundCon->AddWhetherNeedACK(true);
+                        foundCon->SetMaxRecvStreamNum(fr->GetStreamsNum());
                     }
                 }
                 // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 3", _recPktNum);
@@ -659,7 +660,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 }
 
                 if (_nowStream.ShouldIncRecvLimit()) {
-                    //TODO: check if stream size should                        auto params = foundCon->GetFlowControlParams();
+                    //TODO: check if stream size should
                     utils::logger::warn("Increasing stream offset limit");
                     uint64_t cur_limit = _nowStream.GetFlowControlParams().first;
                     auto fr = std::make_shared<payload::MaxStreamDataFrame>(streamID, cur_limit * 1.414);
@@ -675,10 +676,11 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     foundCon->AddPacket(pk);
                     // ACTIVE end to close the stream --- need ack
                     foundCon->AddWhetherNeedACK(true);
+                    _nowStream.SetMaxRecvOffset(fr->GetMaximumStreamData());
                 }
                 if (foundCon->ShouldIncRecvLimit()) {
                     utils::logger::warn("Increasing connection offset limit");
-                    uint64_t cur_limit = std::get<0>(foundCon->GetFlowControlParams());
+                    uint64_t cur_limit = std::get<1>(foundCon->GetFlowControlParams());
                     auto fr = std::make_shared<payload::MaxDataFrame>(cur_limit * 1.414);
                     uint64_t _usePktNum = foundCon->GetNewPktNum();
                     // pktNumLen | dstConID | pktNum
@@ -692,6 +694,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     foundCon->AddPacket(pk);
                     // ACTIVE end to close the stream --- need ack
                     foundCon->AddWhetherNeedACK(true);
+                    foundCon->SetMaxRecvSize(fr->GetMaximumData());
                 }
                 // utils::logger::info("Going to callback!");
                 // this->streamDataReadyCallback(conSeq, streamID, std::move(buf), buflen, (bool)fin);
