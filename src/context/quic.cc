@@ -235,13 +235,13 @@ int QUIC::SocketLoop() {
             /* Idle Time out */
             // deferring and dealing with idle timeout
             if(current_time > connection.second->getIdleTimeoutTime()) {
-                utils::logger::info("idle time out!");
+                // utils::logger::info("idle time out!");
                 auto notAckedSentPkt = connection.second->GetNotACKedSentPkt();
                 if(notAckedSentPkt.size() > 0) {                    
                     // defer idel timeout, send a PING packet
                     if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
                         connection.second->GetConnectionState() != ConnectionState::CLOSED) {
-                        utils::logger::info("client idle timeout and need to defer");                
+                        utils::logger::info("idle timeout and need to defer");                
                         // send a Ping Frame
                         uint64_t _usePktNum = connection.second->GetNewPktNum();
                         utils::logger::info("Sending ping frame packet with packet numbeer = {}, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
@@ -274,12 +274,12 @@ int QUIC::SocketLoop() {
 
             // if nothing to send, send a packet with only a ping frame
             if ((PTO_expired) && (pendingPackets.empty() || connection.second->GetPendingPackageNeedACK() == false)) {
-                // utils::logger::info("PendingPackets is emtpy or first one is not ack-eliciting, check the connectionState = {}",connection.second->GetConnectionState());                
+                utils::logger::info("PTO PendingPackets is emtpy or first one is not ack-eliciting, check the connectionState = {}",connection.second->GetConnectionState());                
                 if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
                     connection.second->GetConnectionState() != ConnectionState::CLOSED) {
                     // send a Ping Frame
                     uint64_t _usePktNum = connection.second->GetNewPktNum();
-                    utils::logger::info("Sending ping frame packet with packet numbeer = {}, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
+                    utils::logger::info("PTO Sending ping frame packet with packet numbeer = {}, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
                     uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
                     // pktNumLen | dstConID | pktNum
                     std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
