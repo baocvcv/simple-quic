@@ -423,7 +423,7 @@ int QUIC::SocketLoop() {
             struct timeval curTime;
             gettimeofday(&curTime, nullptr);
             // uint64_t makes sure this is a positive number
-            uint64_t msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
+            uint64_t msec = curTime.tv_sec * 1000;
 
             // /* add needResendPkts to the end of pendingPackets */
             // auto notAckedSentPkt = connection.second->GetNotACKedSentPkt();
@@ -718,71 +718,85 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 const ConnectionID& localConID = shHdr->GetDstID();
                 std::shared_ptr<Connection> foundCon = nullptr;
                 uint64_t conSeq;
+                bool skip_flag = false;
                 for (auto con: this->connections) {
                     utils::logger::info("localConID = {}, con.second.conID = {}",localConID.ToString(),con.second->getLocalConnectionID().ToString());                    
-                    if (con.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
-                        con.second->GetConnectionState() != ConnectionState::CLOSED &&
-                        con.second->getLocalConnectionID() == localConID) {
-                        foundCon = con.second;
-                        conSeq = con.first;
-                        break;
-                    }
-                }
-                assert(foundCon != nullptr);
-                // utils::logger::info("In Stream frame with the pkt number = {}", _recPktNum);
-                if (foundCon->HaveReceivedPkt(_recPktNum)) {
-                    // utils::logger::info("Haved received the packet = {}", _recPktNum);
-                    break;
-                }
-                // utils::logger::info("In Stream frame with the pkt number = {} not rec yet", _recPktNum);
-                // ADD the received packet to need ACK packet list
-                if (!haveAddedToACK) {
-                    foundCon->addNeedACKRecPkt(recPkt);
-                    haveAddedToACK = true;
-                }
-                // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 2", _recPktNum);
-                if (foundCon->IsStreamIDUsed(streamID) == false) {
-                    // Stream NOT used
-                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 4", _recPktNum);
-                    foundCon->InsertStream(streamID, true);
-                    // Stream READY
-                    // utils::logger::info("conseq = {}, streamid = {}", conSeq, streamID);
-                    this->streamReadyCallback(conSeq, streamID);
-                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 6", _recPktNum);
-                }
-                // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 3", _recPktNum);
-                auto buf = streamFrm->FetchBuffer();
-                size_t buflen = streamFrm->GetLength();
-                size_t bufOffset = streamFrm->GetOffset();
-                uint8_t fin = streamFrm->FINFlag();
-                Stream& _nowStream = foundCon->GetStreamByID(streamID);
-                if (_nowStream.WhetherTpUper(bufOffset)) {
-                    this->streamDataReadyCallback(conSeq, streamID, std::move(buf), buflen, (bool)fin);
-                    _nowStream.UpdateExpOffset(buflen);
-                    std::pair<std::unique_ptr<uint8_t[]>, std::pair<uint64_t, bool>> _bufStreamInfo;
-                    while (true) {
-                        _bufStreamInfo = _nowStream.GetBufferedStream();
-                        if (_bufStreamInfo.first == nullptr) {
+                    if(con.second->getLocalConnectionID() == localConID) {
+                        if(con.second->GetConnectionState() == ConnectionState::WAIT_FOR_PEER_CLOSE) {
+                            skip_flag = true;
                             break;
                         }
-                        bool _nowfin = _bufStreamInfo.second.second;
-                        // bool _nowfin = _nowStream.GetAndPopBufferedFin();
-                        this->streamDataReadyCallback(conSeq, streamID, 
-                                    std::move(_bufStreamInfo.first), _bufStreamInfo.second.first, _nowfin);
+                        else if(con.second->GetConnectionState() != ConnectionState::CLOSED) {
+                            foundCon = con.second;
+                            conSeq = con.first;
+                            break;
+                        }
                     }
-                } else {
-                    utils::logger::warn("Got a disorder stream frame.");
-                    // _nowStream.UpdateExpOffset(buflen);
-                    _nowStream.AddToBufferedFin((bool)fin);
-                    _nowStream.AddToBufferedStream(std::move(buf), bufOffset, buflen);
-                    utils::logger::warn("Buffered stream packet number = {}", _nowStream.GetBufferedStreamLength());
+                    // if (con.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
+                    //     con.second->GetConnectionState() != ConnectionState::CLOSED &&
+                    //     con.second->getLocalConnectionID() == localConID) {
+                    //     foundCon = con.second;
+                    //     conSeq = con.first;
+                    //     break;
+                    // }
                 }
-                // utils::logger::info("Going to callback!");
-                // this->streamDataReadyCallback(conSeq, streamID, std::move(buf), buflen, (bool)fin);
-                
-                // update idle timeout
-                foundCon->updateIdleTime(true); // no_ack_elicity_packet_sent = true
-                } else if (frm->Type() == payload::FrameType::RESET_STREAM) {
+                if(!skip_flag) {
+                    assert(foundCon != nullptr);
+                    // utils::logger::info("In Stream frame with the pkt number = {}", _recPktNum);
+                    if (foundCon->HaveReceivedPkt(_recPktNum)) {
+                        // utils::logger::info("Haved received the packet = {}", _recPktNum);
+                        break;
+                    }
+                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet", _recPktNum);
+                    // ADD the received packet to need ACK packet list
+                    if (!haveAddedToACK) {
+                        foundCon->addNeedACKRecPkt(recPkt);
+                        haveAddedToACK = true;
+                    }
+                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 2", _recPktNum);
+                    if (foundCon->IsStreamIDUsed(streamID) == false) {
+                        // Stream NOT used
+                        // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 4", _recPktNum);
+                        foundCon->InsertStream(streamID, true);
+                        // Stream READY
+                        // utils::logger::info("conseq = {}, streamid = {}", conSeq, streamID);
+                        this->streamReadyCallback(conSeq, streamID);
+                        // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 6", _recPktNum);
+                    }
+                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 3", _recPktNum);
+                    auto buf = streamFrm->FetchBuffer();
+                    size_t buflen = streamFrm->GetLength();
+                    size_t bufOffset = streamFrm->GetOffset();
+                    uint8_t fin = streamFrm->FINFlag();
+                    Stream& _nowStream = foundCon->GetStreamByID(streamID);
+                    if (_nowStream.WhetherTpUper(bufOffset)) {
+                        this->streamDataReadyCallback(conSeq, streamID, std::move(buf), buflen, (bool)fin);
+                        _nowStream.UpdateExpOffset(buflen);
+                        std::pair<std::unique_ptr<uint8_t[]>, std::pair<uint64_t, bool>> _bufStreamInfo;
+                        while (true) {
+                            _bufStreamInfo = _nowStream.GetBufferedStream();
+                            if (_bufStreamInfo.first == nullptr) {
+                                break;
+                            }
+                            bool _nowfin = _bufStreamInfo.second.second;
+                            // bool _nowfin = _nowStream.GetAndPopBufferedFin();
+                            this->streamDataReadyCallback(conSeq, streamID, 
+                                        std::move(_bufStreamInfo.first), _bufStreamInfo.second.first, _nowfin);
+                        }
+                    } else {
+                        utils::logger::warn("Got a disorder stream frame.");
+                        // _nowStream.UpdateExpOffset(buflen);
+                        _nowStream.AddToBufferedFin((bool)fin);
+                        _nowStream.AddToBufferedStream(std::move(buf), bufOffset, buflen);
+                        utils::logger::warn("Buffered stream packet number = {}", _nowStream.GetBufferedStreamLength());
+                    }
+                    // utils::logger::info("Going to callback!");
+                    // this->streamDataReadyCallback(conSeq, streamID, std::move(buf), buflen, (bool)fin);
+                    
+                    // update idle timeout
+                    foundCon->updateIdleTime(true); // no_ack_elicity_packet_sent = true
+                }
+            } else if (frm->Type() == payload::FrameType::RESET_STREAM) {
                 std::shared_ptr<payload::ResetStreamFrame> rstStrFrm = std::dynamic_pointer_cast<payload::ResetStreamFrame>(frm);
                 uint64_t errorCode = rstStrFrm->GetAppProtoErrCode();
                 uint64_t finalSize = rstStrFrm->GetFinalSize();
@@ -921,29 +935,43 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 utils::logger::info("Got a ping frame from the one-rtt packet, DstID = {}",localConID.ToString());
                 std::shared_ptr<Connection> foundCon = nullptr;
                 uint64_t conSeq;
+                bool skip_flag = false;
                 for (auto con: this->connections) {
-                    if (con.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
-                        con.second->GetConnectionState() != ConnectionState::CLOSED &&
-                        con.second->getLocalConnectionID() == localConID) {
-                        foundCon = con.second;
-                        conSeq = con.first;
+                    if(con.second->getLocalConnectionID() == localConID) {
+                        if(con.second->GetConnectionState() == ConnectionState::WAIT_FOR_PEER_CLOSE) {
+                            skip_flag = true;
+                            break;
+                        }
+                        else if(con.second->GetConnectionState() != ConnectionState::CLOSED) {
+                            foundCon = con.second;
+                            conSeq = con.first;
+                            break;
+                        }
+                    }
+                    // if (con.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
+                    //     con.second->GetConnectionState() != ConnectionState::CLOSED &&
+                    //     con.second->getLocalConnectionID() == localConID) {
+                    //     foundCon = con.second;
+                    //     conSeq = con.first;
+                    //     break;
+                    // }
+                }
+                if(!skip_flag) {
+                    assert(foundCon != nullptr);
+                    utils::logger::info("In Ping frame with the pkt number = {}", _recPktNum);
+                    if (foundCon->HaveReceivedPkt(_recPktNum)) {
+                        utils::logger::info("Haved received the Ping packet = {}", _recPktNum);
                         break;
                     }
+                    utils::logger::info("In Ping frame with the pkt number = {} not rec yet", _recPktNum);
+                    // ADD the received packet to need ACK packet list
+                    if (!haveAddedToACK) {
+                        foundCon->addNeedACKRecPkt(recPkt);
+                        haveAddedToACK = true;
+                    }                
+                    // update idle timeout
+                    foundCon->updateIdleTime(true); // no_ack_elicity_packet_sent = true
                 }
-                assert(foundCon != nullptr);
-                utils::logger::info("In Ping frame with the pkt number = {}", _recPktNum);
-                if (foundCon->HaveReceivedPkt(_recPktNum)) {
-                    utils::logger::info("Haved received the Ping packet = {}", _recPktNum);
-                    break;
-                }
-                utils::logger::info("In Ping frame with the pkt number = {} not rec yet", _recPktNum);
-                // ADD the received packet to need ACK packet list
-                if (!haveAddedToACK) {
-                    foundCon->addNeedACKRecPkt(recPkt);
-                    haveAddedToACK = true;
-                }                
-                // update idle timeout
-                foundCon->updateIdleTime(true); // no_ack_elicity_packet_sent = true
             } 
         }
         break;
