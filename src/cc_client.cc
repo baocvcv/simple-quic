@@ -3,7 +3,7 @@
 #include "utils/log.hh"
 
 using namespace std::chrono_literals;
-constexpr size_t BUFFER_SIZE = 8 * 1024 * 1024;
+constexpr size_t BUFFER_SIZE = 8 * 1024;// * 1024;
 constexpr size_t TEMP_BUFFER_SIZE = 8 * 1024;
 
 class Client {

@@ -203,105 +203,37 @@ int QUIC::SocketLoop() {
         // if (datagram) {
         //     this->incomingMsg(std::move(datagram));
         // }
+
+        bool PTO_expired = false;
+
+        // deal with if PTO expired
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
         uint64_t current_time = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
+        for(auto& connection : this->connections) {
+            std::list<PTOTimer> connection_PTO_timers = connection.second->GetPTOTimers();
+            int count = 0;
+            for(auto PTO_timer : connection_PTO_timers) {
+                if(current_time > PTO_timer.PTO_expire_time) {
+                    PTO_expired = true;
+                    connection.second->updatePTO();
+                }
+            }
+        }
+
 
         // send packages
-        uint64_t connection_descriptor = -1;
         for (auto& connection : this->connections) {
-            connection_descriptor++;
             // utils::logger::info("Now going to print the sent but not acked packets and rec but not acked packets");
             
             // connection.second->PrintSentNeedACKPktNum();
             // connection.second->PrintRecNotACKPktNum();
             auto& pendingPackets = connection.second->GetPendingPackets();
             int sentWhenCongested = 0;
-
-            // deal with if PTO expired
-            bool PTO_expired = false;
-            for(auto& connection : this->connections) {
-                std::list<PTOTimer> connection_PTO_timers = connection.second->GetPTOTimers();
-                for(auto PTO_timer : connection_PTO_timers) {
-                    if(current_time > PTO_timer.PTO_expire_time) {
-                        PTO_expired = true;
-                        connection.second->updatePTO();
-                    }
-                }
-            }
-            // utils::logger::info("PTO_expired = {} for localConnectionID = {} and remoteConnectionID = {}",PTO_expired,connection.second->getLocalConnectionID().ToString(),connection.second->getRemoteConnectionID().ToString());                
-            // utils::logger::info("PTO_expired = {}, pendingPackets.empyt? = {}",PTO_expired,pendingPackets.empty());                
             
-            /* Idle Time out */
-            // deferring and dealing with idle timeout
-            if(current_time > connection.second->getIdleTimeoutTime()) {
-                utils::logger::info("idle time out!");
-                auto notAckedSentPkt = connection.second->GetNotACKedSentPkt();
-                if(notAckedSentPkt.size() > 0) {                    
-                    // defer idel timeout, send a PING packet
-                    if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
-                        connection.second->GetConnectionState() != ConnectionState::CLOSED) {
-                        utils::logger::info("client idle timeout and need to defer");                
-                        // send a Ping Frame
-                        uint64_t _usePktNum = connection.second->GetNewPktNum();
-                        utils::logger::info("Sending ping frame packet with packet numbeer = {}, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
-                        uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
-                        // pktNumLen | dstConID | pktNum
-                        std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
-                                                                    connection.second->getRemoteConnectionID(), _usePktNum);
-                        utils::ByteStream emptyBys(nullptr, 0);
-                        std::shared_ptr<payload::Payload> pld = std::make_shared<payload::Payload>(emptyBys, 0);
-                        std::shared_ptr<payload::PingFrame> pingFrm = std::make_shared<payload::PingFrame>();
-                        pld->AttachFrame(pingFrm);
-                        std::shared_ptr<payload::Packet> pk = std::make_shared<payload::Packet>(shHdr, pld, connection.second->GetSockaddrTo());
-                        // auto newDatagram = QUIC::encodeDatagram(pk);
-                        // this->socket.sendMsg(newDatagram);
-                        // connection.second->UpdateOnFlightBySentPktLen(pk->EncodeLen());
-                        connection.second->AddPacket_to_front(pk);
-                        connection.second->AddWhetherNeedACK_to_front(true);
-                    }
-                }
-                else {
-                    // idle timeout, send a CONNECTION_CLOSE frame immediately
-                    if( type == PeerType::CLIENT &&
-                        connection.second->GetConnectionState() != ConnectionState::CREATED &&
-                        connection.second->GetConnectionState() != ConnectionState::CLOSED) {
-                        utils::logger::info("client idle timeout and do not need to defer");                
-                        this->CloseConnection(connection_descriptor,"Idle Timeout",1);
-                    }
-                }
-            }
-
-            // if nothing to send, send a packet with only a ping frame
-            if ((PTO_expired) && (pendingPackets.empty() || connection.second->GetPendingPackageNeedACK() == false)) {
-                // utils::logger::info("PendingPackets is emtpy or first one is not ack-eliciting, check the connectionState = {}",connection.second->GetConnectionState());                
-                if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
-                    connection.second->GetConnectionState() != ConnectionState::CLOSED) {
-                    // send a Ping Frame
-                    uint64_t _usePktNum = connection.second->GetNewPktNum();
-                    utils::logger::info("Sending ping frame packet with packet numbeer = {}, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
-                    uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
-                    // pktNumLen | dstConID | pktNum
-                    std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
-                                                                connection.second->getRemoteConnectionID(), _usePktNum);
-                    utils::ByteStream emptyBys(nullptr, 0);
-                    std::shared_ptr<payload::Payload> pld = std::make_shared<payload::Payload>(emptyBys, 0);
-                    std::shared_ptr<payload::PingFrame> pingFrm = std::make_shared<payload::PingFrame>();
-                    pld->AttachFrame(pingFrm);
-                    std::shared_ptr<payload::Packet> pk = std::make_shared<payload::Packet>(shHdr, pld, connection.second->GetSockaddrTo());
-                    // auto newDatagram = QUIC::encodeDatagram(pk);
-                    // this->socket.sendMsg(newDatagram);
-                    // connection.second->UpdateOnFlightBySentPktLen(pk->EncodeLen());
-                    connection.second->AddPacket_to_front(pk);
-                    connection.second->AddWhetherNeedACK_to_front(true);
-                }
-            }
-
             // SEND regular packets
             // utils::logger::info("Number of pending packets = {}", pendingPackets.size());
-            int explicit_ack_packet_sent = 0;
             while (!pendingPackets.empty()) {
-                // utils::logger::info("PendingPackets is not emtpy, check the connectionState = {}",connection.second->GetConnectionState());                
                 // Have been ACKed --- need not to send again
                 if (connection.second->WhetherAckedPktNum(pendingPackets.front()->GetPktNum())) {
                     connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
@@ -326,18 +258,9 @@ int QUIC::SocketLoop() {
                     }
                 if (connection.second->GetPendingPackageNeedACK() == true) {
                     connection.second->addNeedACKSentPkt(pendingPackets.front());
-                    explicit_ack_packet_sent++;
-                    // update idle time if necessary
-                    if(connection.second->GetNoAckElicitPacketSentState()) {
-                        // this is the first ACK Eliciting Packet that is sent after the last received
-                        connection.second->updateIdleTime(false);
-                    }
                 } else {
-                    // ???
-                    // assert(PTO_expired==false);
-                    connection.second->addSentPkt(pendingPackets.front());                  
+                    connection.second->addSentPkt(pendingPackets.front());
                 }
-
                 // GET ack frame for the connection --- the list is then cleared ---- also reasonable...
                 // std::shared_ptr<payload::ACKFrame> _ackRecFrm = connection.second->GetACKFrameForRecPackages();
                 // If still having packages that need ACK --- attach an ack frame to the sending package.
@@ -352,58 +275,7 @@ int QUIC::SocketLoop() {
                     connection.second->UpdateOnFlightBySentPktLen(pendingPackets.front()->EncodeLen());
                 pendingPackets.pop_front();
                 connection.second->PopWhetherNeedACK();
-
-                if(PTO_expired)
-                    break;
-
-                // if(PTO_expired) {
-                //     if(explicit_ack_packet_sent > 0) {
-                //         assert(explicit_ack_packet_sent==1);                        
-                //         auto newDatagram = QUIC::encodeDatagram(pendingPackets.front());
-                //         if (rand() % 10 < 8)
-                //             this->socket.sendMsg(newDatagram);
-                //         connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
-                //         // UPDATE this connection's onFlight packet length;
-                //         if (connection.second->GetPendingPackageNeedACK() == true)
-                //             connection.second->UpdateOnFlightBySentPktLen(pendingPackets.front()->EncodeLen());
-                //         pendingPackets.pop_front();
-                //         connection.second->PopWhetherNeedACK();
-                //     }
-                //     else {
-                //         assert(explicit_ack_packet_sent==0);
-                //         // send a Ping Frame
-                //         uint64_t _usePktNum = connection.second->GetNewPktNum();
-                //         utils::logger::info("Sending ping frame packet with packet numbeer= {}, as the pendingPackets.front() is not explicit ack, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
-                //         uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
-                //         // pktNumLen | dstConID | pktNum
-                //         std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
-                //                                                     connection.second->getRemoteConnectionID(), _usePktNum);
-                //         utils::ByteStream emptyBys(nullptr, 0);
-                //         std::shared_ptr<payload::Payload> pld = std::make_shared<payload::Payload>(emptyBys, 0);
-                //         std::shared_ptr<payload::PingFrame> pingFrm = std::make_shared<payload::PingFrame>();
-                //         pld->AttachFrame(pingFrm);
-                //         std::shared_ptr<payload::Packet> pk = std::make_shared<payload::Packet>(shHdr, pld, connection.second->GetSockaddrTo());
-                //         auto newDatagram = QUIC::encodeDatagram(pk);
-                //         this->socket.sendMsg(newDatagram);
-                //         connection.second->UpdateOnFlightBySentPktLen(pk->EncodeLen());
-                //     }
-                // }
-                // else {
-                //     // GET ack frame for the connection --- the list is then cleared ---- also reasonable...
-                //     // std::shared_ptr<payload::ACKFrame> _ackRecFrm = connection.second->GetACKFrameForRecPackages();
-                //     // If still having packages that need ACK --- attach an ack frame to the sending package.
-                //     // if (_ackRecFrm != nullptr)
-                //     //     pendingPackets.front()->GetPktPayload()->AttachFrame(_ackRecFrm);
-                //     auto newDatagram = QUIC::encodeDatagram(pendingPackets.front());
-                //     if (rand() % 10 < 8)
-                //         this->socket.sendMsg(newDatagram);
-                //     connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
-                //     // UPDATE this connection's onFlight packet length;
-                //     if (connection.second->GetPendingPackageNeedACK() == true)
-                //         connection.second->UpdateOnFlightBySentPktLen(pendingPackets.front()->EncodeLen());
-                //     pendingPackets.pop_front();
-                //     connection.second->PopWhetherNeedACK();
-                // }
+                
             }
 
             if (connection.second->GetConnectionState() == ConnectionState::CLOSED) {
@@ -544,7 +416,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
             utils::logger::warn("[Connection {}] allocate local ID {}", conDes, localConID.ToString());
             connection->SetDstConnectionID(expRemoteID);
             connection->initPTO();
-            utils::logger::warn("[Connection {}] newConnection::peer ID exchanged,local: {}, remote: {}", conDes, localConID.ToString(), remoteConID.ToString());
+            utils::logger::warn("[Connection {}] peer ID exchanged,local: {}, remote: {}", conDes, localConID.ToString(), remoteConID.ToString());
             this->connections[conDes] = connection;
             // payload::Initial initHdr;
             uint64_t _usePktNum = connection->GetNewPktNum();
@@ -576,9 +448,6 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
             connection->SetConnectionState(ConnectionState::PEER_ESTABLISHED);
             this->connectionReadyCallback(conDes); // callback connection ready function
             
-            // update idle timeout
-            connection->updateIdleTime(true); // no_ack_elicity_packet_sent = true
-
         } else if (foundConnection->GetConnectionState() == ConnectionState::CREATED) {
             if (foundConnection->HaveReceivedPkt(_recPktNum)) {
                 break;
@@ -587,7 +456,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
             foundConnection->SetSrcConnectionID(localConID);
             ConnectionIDGenerator generator = ConnectionIDGenerator::Get();
             generator.AddUsedConnectionID(localConID);
-            utils::logger::warn("[Connection 0] CREAT::peer ID exchanged,local: {}, remote: {}", 
+            utils::logger::warn("[Connection 0] peer ID exchanged,local: {}, remote: {}", 
                                 localConID.ToString(), remoteConID.ToString());
             this->connectionReadyCallback(descriptor); // callback connection ready function
             foundConnection->SetConnectionState(ConnectionState::ESTABLISHED);
@@ -624,10 +493,6 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     foundConnection->AddAckedSentPktNum(_recACKInS);
                 }
             }
-
-            // update idle timeout
-            foundConnection->updateIdleTime(true); // no_ack_elicity_packet_sent = true
-
         } else if (foundConnection->GetConnectionState() == ConnectionState::PEER_ESTABLISHED) {
             // utils::logger::info("Got a feedback connection peer_established packet = {}", _recPktNum);
             if (foundConnection->HaveReceivedPkt(_recPktNum)) {
@@ -654,9 +519,6 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 }
             }
             // NEED not send ACK again
-            
-            // update idle timeout
-            foundConnection->updateIdleTime(true); // no_ack_elicity_packet_sent = true
         } else if (foundConnection->GetConnectionState() == ConnectionState::ESTABLISHED) {
             utils::logger::info("Got packet initial ESTAB");
             /*
@@ -695,8 +557,6 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     foundConnection->AddAckedSentPktNum(_recACKInS);
                 }
             }
-            // update idle timeout
-            foundConnection->updateIdleTime(true); // no_ack_elicity_packet_sent = true
         }
         break;
     }
@@ -712,94 +572,72 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
             nowIdx += 1;
             if (frm->Type() == payload::FrameType::STREAM) {
                 // STREAM Frame
-                utils::logger::info("Got a stream frame from the one-rtt packet.");
+                // utils::logger::info("Got a stream frame from the one-rtt packet.");
                 std::shared_ptr<payload::StreamFrame> streamFrm = std::dynamic_pointer_cast<payload::StreamFrame>(frm);
                 uint64_t streamID = streamFrm->StreamID();
                 const ConnectionID& localConID = shHdr->GetDstID();
                 std::shared_ptr<Connection> foundCon = nullptr;
                 uint64_t conSeq;
-                bool skip_flag = false;
-                // for (auto con: this->connections) {
-                //     utils::logger::info("[check connection count]::localConID = {}, con.second.conID = {}, connectionState = {}",localConID.ToString(),con.second->getLocalConnectionID().ToString(),con.second->GetConnectionState());                    
-                // }
                 for (auto con: this->connections) {
-                    utils::logger::info("localConID = {}, con.second.conID = {}, connectionState = {}",localConID.ToString(),con.second->getLocalConnectionID().ToString(),con.second->GetConnectionState());                    
-                    if(con.second->getLocalConnectionID() == localConID) {
-                        if(con.second->GetConnectionState() == ConnectionState::WAIT_FOR_PEER_CLOSE || 
-                           con.second->GetConnectionState() == ConnectionState::CLOSED) {
-                            skip_flag = true;
-                            break;
-                        }
-                        else {
-                            foundCon = con.second;
-                            conSeq = con.first;
-                            break;
-                        }
-                    }
-                    // if (con.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
-                    //     con.second->GetConnectionState() != ConnectionState::CLOSED &&
-                    //     con.second->getLocalConnectionID() == localConID) {
-                    //     foundCon = con.second;
-                    //     conSeq = con.first;
-                    //     break;
-                    // }
-                }
-                if(!skip_flag) {
-                    assert(foundCon != nullptr);
-                    // utils::logger::info("In Stream frame with the pkt number = {}", _recPktNum);
-                    if (foundCon->HaveReceivedPkt(_recPktNum)) {
-                        // utils::logger::info("Haved received the packet = {}", _recPktNum);
+                    if (con.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
+                        con.second->GetConnectionState() != ConnectionState::CLOSED &&
+                        con.second->getLocalConnectionID() == localConID) {
+                        foundCon = con.second;
+                        conSeq = con.first;
                         break;
                     }
-                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet", _recPktNum);
-                    // ADD the received packet to need ACK packet list
-                    if (!haveAddedToACK) {
-                        foundCon->addNeedACKRecPkt(recPkt);
-                        haveAddedToACK = true;
-                    }
-                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 2", _recPktNum);
-                    if (foundCon->IsStreamIDUsed(streamID) == false) {
-                        // Stream NOT used
-                        // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 4", _recPktNum);
-                        foundCon->InsertStream(streamID, true);
-                        // Stream READY
-                        // utils::logger::info("conseq = {}, streamid = {}", conSeq, streamID);
-                        this->streamReadyCallback(conSeq, streamID);
-                        // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 6", _recPktNum);
-                    }
-                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 3", _recPktNum);
-                    auto buf = streamFrm->FetchBuffer();
-                    size_t buflen = streamFrm->GetLength();
-                    size_t bufOffset = streamFrm->GetOffset();
-                    uint8_t fin = streamFrm->FINFlag();
-                    Stream& _nowStream = foundCon->GetStreamByID(streamID);
-                    if (_nowStream.WhetherTpUper(bufOffset)) {
-                        this->streamDataReadyCallback(conSeq, streamID, std::move(buf), buflen, (bool)fin);
-                        _nowStream.UpdateExpOffset(buflen);
-                        std::pair<std::unique_ptr<uint8_t[]>, std::pair<uint64_t, bool>> _bufStreamInfo;
-                        while (true) {
-                            _bufStreamInfo = _nowStream.GetBufferedStream();
-                            if (_bufStreamInfo.first == nullptr) {
-                                break;
-                            }
-                            bool _nowfin = _bufStreamInfo.second.second;
-                            // bool _nowfin = _nowStream.GetAndPopBufferedFin();
-                            this->streamDataReadyCallback(conSeq, streamID, 
-                                        std::move(_bufStreamInfo.first), _bufStreamInfo.second.first, _nowfin);
-                        }
-                    } else {
-                        utils::logger::warn("Got a disorder stream frame.");
-                        // _nowStream.UpdateExpOffset(buflen);
-                        _nowStream.AddToBufferedFin((bool)fin);
-                        _nowStream.AddToBufferedStream(std::move(buf), bufOffset, buflen);
-                        utils::logger::warn("Buffered stream packet number = {}", _nowStream.GetBufferedStreamLength());
-                    }
-                    // utils::logger::info("Going to callback!");
-                    // this->streamDataReadyCallback(conSeq, streamID, std::move(buf), buflen, (bool)fin);
-                    
-                    // update idle timeout
-                    foundCon->updateIdleTime(true); // no_ack_elicity_packet_sent = true
                 }
+                assert(foundCon != nullptr);
+                // utils::logger::info("In Stream frame with the pkt number = {}", _recPktNum);
+                if (foundCon->HaveReceivedPkt(_recPktNum)) {
+                    // utils::logger::info("Haved received the packet = {}", _recPktNum);
+                    break;
+                }
+                // utils::logger::info("In Stream frame with the pkt number = {} not rec yet", _recPktNum);
+                // ADD the received packet to need ACK packet list
+                if (!haveAddedToACK) {
+                    foundCon->addNeedACKRecPkt(recPkt);
+                    haveAddedToACK = true;
+                }
+                // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 2", _recPktNum);
+                if (foundCon->IsStreamIDUsed(streamID) == false) {
+                    // Stream NOT used
+                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 4", _recPktNum);
+                    foundCon->InsertStream(streamID, true);
+                    // Stream READY
+                    // utils::logger::info("conseq = {}, streamid = {}", conSeq, streamID);
+                    this->streamReadyCallback(conSeq, streamID);
+                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 6", _recPktNum);
+                }
+                // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 3", _recPktNum);
+                auto buf = streamFrm->FetchBuffer();
+                size_t buflen = streamFrm->GetLength();
+                size_t bufOffset = streamFrm->GetOffset();
+                uint8_t fin = streamFrm->FINFlag();
+                Stream& _nowStream = foundCon->GetStreamByID(streamID);
+                if (_nowStream.WhetherTpUper(bufOffset)) {
+                    this->streamDataReadyCallback(conSeq, streamID, std::move(buf), buflen, (bool)fin);
+                    _nowStream.UpdateExpOffset(buflen);
+                    std::pair<std::unique_ptr<uint8_t[]>, std::pair<uint64_t, bool>> _bufStreamInfo;
+                    while (true) {
+                        _bufStreamInfo = _nowStream.GetBufferedStream();
+                        if (_bufStreamInfo.first == nullptr) {
+                            break;
+                        }
+                        bool _nowfin = _bufStreamInfo.second.second;
+                        // bool _nowfin = _nowStream.GetAndPopBufferedFin();
+                        this->streamDataReadyCallback(conSeq, streamID, 
+                                    std::move(_bufStreamInfo.first), _bufStreamInfo.second.first, _nowfin);
+                    }
+                } else {
+                    utils::logger::warn("Got a disorder stream frame.");
+                    // _nowStream.UpdateExpOffset(buflen);
+                    _nowStream.AddToBufferedFin((bool)fin);
+                    _nowStream.AddToBufferedStream(std::move(buf), bufOffset, buflen);
+                    utils::logger::warn("Buffered stream packet number = {}", _nowStream.GetBufferedStreamLength());
+                }
+                // utils::logger::info("Going to callback!");
+                // this->streamDataReadyCallback(conSeq, streamID, std::move(buf), buflen, (bool)fin);
             } else if (frm->Type() == payload::FrameType::RESET_STREAM) {
                 std::shared_ptr<payload::ResetStreamFrame> rstStrFrm = std::dynamic_pointer_cast<payload::ResetStreamFrame>(frm);
                 uint64_t errorCode = rstStrFrm->GetAppProtoErrCode();
@@ -838,8 +676,6 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 // seq | streamID | buf | bufLen | fin
                 this->streamDataReadyCallback(conSeq, streamID, nullptr, 0, true);
 
-                // update idle timeout
-                foundCon->updateIdleTime(true); // no_ack_elicity_packet_sent = true
             } else if (frm->Type() == payload::FrameType::CONNECTION_CLOSE) {
                 std::shared_ptr<payload::ConnectionCloseQUICFrame> ccqFrm = std::dynamic_pointer_cast<payload::ConnectionCloseQUICFrame>(frm);
                 uint64_t errorCode = ccqFrm->GetErrorCode();
@@ -847,9 +683,6 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 const ConnectionID& localConID = shHdr->GetDstID();
                 std::shared_ptr<Connection> foundCon = nullptr;
                 uint64_t conSeq;
-                // for (auto con: this->connections) {
-                //     utils::logger::info("[check connection count]::localConID = {}, con.second.conID = {}, connectionState = {}",localConID.ToString(),con.second->getLocalConnectionID().ToString(),con.second->GetConnectionState());                    
-                // }
                 for (auto con: this->connections) {
                     if (con.second->getLocalConnectionID() == localConID) {
                         foundCon = con.second;
@@ -890,8 +723,6 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 utils::logger::warn("Receive CONNECTION_CLOSE frame, transition to DRAIN state");
                 this->connectionCloseCallback(conSeq, reason, errorCode);
                 // registter?? --- what's this?
-                // update idle timeout
-                foundCon->updateIdleTime(true); // no_ack_elicity_packet_sent = true
             } else if (frm->Type() == payload::FrameType::ACK) {
                 // utils::logger::warn("Receive an ACK frame");
                 const ConnectionID& localConID = shHdr->GetDstID();
@@ -933,58 +764,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 // utils::logger::warn("Going to remove ACKed sent packets from the connection");
                 foundCon->remNeedACKPkt(_recACKInS); // remove the sent packages that need ACK.
                 foundCon->AddAckedSentPktNum(_recACKInS);
-                // update idle timeout
-                foundCon->updateIdleTime(true); // no_ack_elicity_packet_sent = true
-            } else if (frm->Type() == payload::FrameType::PING) {
-                utils::logger::info("Got a ping frame from the one-rtt packet.");
-                std::shared_ptr<payload::PingFrame> pingFrm = std::dynamic_pointer_cast<payload::PingFrame>(frm);
-                const ConnectionID& localConID = shHdr->GetDstID();
-                utils::logger::info("Got a ping frame from the one-rtt packet, DstID = {}",localConID.ToString());
-                std::shared_ptr<Connection> foundCon = nullptr;
-                uint64_t conSeq;
-                bool skip_flag = false;
-                // for (auto con: this->connections) {
-                //     utils::logger::info("[check connection count]::localConID = {}, con.second.conID = {}, connectionState = {}",localConID.ToString(),con.second->getLocalConnectionID().ToString(),con.second->GetConnectionState());                    
-                // }
-                for (auto con: this->connections) {
-                    utils::logger::info("localConID = {}, con.second.conID = {}, connectionState = {}",localConID.ToString(),con.second->getLocalConnectionID().ToString(),con.second->GetConnectionState());                    
-                    if(con.second->getLocalConnectionID() == localConID) {
-                        if(con.second->GetConnectionState() == ConnectionState::WAIT_FOR_PEER_CLOSE ||
-                           con.second->GetConnectionState() == ConnectionState::CLOSED) {
-                            skip_flag = true;
-                            break;
-                        }
-                        else {
-                            foundCon = con.second;
-                            conSeq = con.first;
-                            break;
-                        }
-                    }
-                    // if (con.second->GetConnectionState() != ConnectionState::WAIT_FOR_PEER_CLOSE &&
-                    //     con.second->GetConnectionState() != ConnectionState::CLOSED &&
-                    //     con.second->getLocalConnectionID() == localConID) {
-                    //     foundCon = con.second;
-                    //     conSeq = con.first;
-                    //     break;
-                    // }
-                }
-                if(!skip_flag) {
-                    assert(foundCon != nullptr);
-                    utils::logger::info("In Ping frame with the pkt number = {}", _recPktNum);
-                    if (foundCon->HaveReceivedPkt(_recPktNum)) {
-                        utils::logger::info("Haved received the Ping packet = {}", _recPktNum);
-                        break;
-                    }
-                    utils::logger::info("In Ping frame with the pkt number = {} not rec yet", _recPktNum);
-                    // ADD the received packet to need ACK packet list
-                    if (!haveAddedToACK) {
-                        foundCon->addNeedACKRecPkt(recPkt);
-                        haveAddedToACK = true;
-                    }                
-                    // update idle timeout
-                    foundCon->updateIdleTime(true); // no_ack_elicity_packet_sent = true
-                }
-            } 
+            }
         }
         break;
     }
