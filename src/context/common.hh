@@ -17,5 +17,14 @@ enum class StreamType {
 
 constexpr size_t STREAM_TYPE_NUM = 4;
 
+enum TransportErrorCodes {
+    NO_ERROR = 0x0,
+    INTERNAL_ERROR = 0x1,
+    CONNECTION_REFUSED = 0x2,
+    FLOW_CONTROL_ERROR = 0x3,
+    STREAM_LIMIT_ERROR = 0x4,
+    STREAM_STATE_ERROR = 0x5,
+};
+
 }  // namespace thquic::context
 #endif

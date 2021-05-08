@@ -253,10 +253,6 @@ class Connection {
         throw std::runtime_error("Connection descriptor exhausted!");*/
     }
 
-    bool ShouldIncStreamNumLimit() {
-        return this->streamIDToStream.size() >= this->max_recv_stream_num * FLOW_CONTROL_THRESH;
-    }
-
     uint64_t GenerateStreamID(PeerType type, bool bidirectional) {
         for (uint64_t i = 0; i < this->max_send_stream_num; i++) {
             // step1: form a streamID
@@ -325,6 +321,9 @@ class Connection {
     // to the socket and add ACK frame in the payload
     // StreamReadyCallback: add the new stream to self stream and send an INITIAL package
     int InsertStream(uint64_t streamID, bool bidirectional) {
+        if (streamID >= this->max_send_stream_num) {
+            return -1;
+        }
         auto insertRes = this->usedStreamID[streamID&0x3].insert((streamID>>2)&0x3FFFFFFFFFFFFFFF);
         if (!insertRes.second) {
             return -1; // has existed in this connection
@@ -366,25 +365,26 @@ class Connection {
     }
 
     size_t GetFinalSizeByStreamID(uint64_t streamID) {
-        size_t totLen = 0;
-        for (auto pkt: this->pendingPackets) {
-            // Use length of the total packet (for both header and the payload) or just the payload?
-            // totLen += pkt->EncodeLen();
-            auto pld = pkt->GetPktPayload();
-            for (auto frm: pld->GetFrames()) {
-                // Just STREAM frames are needed to be calculated or orther frames?
-                //TODO: only count stream packets?
-                if (frm->Type() == payload::FrameType::STREAM
-                        || frm->Type() == payload::FrameType::MAX_STREAMS
-                        || frm->Type() == payload::FrameType::MAX_STREAM_DATA) {
-                    std::shared_ptr<payload::StreamFrame> strmFrm = std::dynamic_pointer_cast<payload::StreamFrame>(frm);
-                    if (strmFrm->StreamID() == streamID) {
-                        totLen += frm->EncodeLen();
-                    }
-                }
-            }
-        }
-        return totLen;
+        // size_t totLen = 0;
+        // for (auto pkt: this->pendingPackets) {
+        //     // Use length of the total packet (for both header and the payload) or just the payload?
+        //     // totLen += pkt->EncodeLen();
+        //     auto pld = pkt->GetPktPayload();
+        //     for (auto frm: pld->GetFrames()) {
+        //         // Just STREAM frames are needed to be calculated or orther frames?
+        //         //TODO: only count stream packets?
+        //         if (frm->Type() == payload::FrameType::STREAM) {
+        //                 // || frm->Type() == payload::FrameType::MAX_STREAMS
+        //                 // || frm->Type() == payload::FrameType::MAX_STREAM_DATA) {
+        //             std::shared_ptr<payload::StreamFrame> strmFrm = std::dynamic_pointer_cast<payload::StreamFrame>(frm);
+        //             if (strmFrm->StreamID() == streamID) {
+        //                 totLen += frm->EncodeLen();
+        //             }
+        //         }
+        //     }
+        // }
+        // return totLen;
+        return this->streamIDToStream[streamID].GetSendOffset();
     }
 
 
@@ -906,7 +906,7 @@ class Connection {
         for (auto& e: this->streamIDToStream) {
             cur_size += e.second.GetRecvOffset();
         }
-        return cur_size <= max_recv_size * FLOW_CONTROL_THRESH;
+        return cur_size >= max_recv_size * FLOW_CONTROL_THRESH;
     }
 
     bool IsRecvPermitted(uint64_t bufLen) {
@@ -923,6 +923,10 @@ class Connection {
             cur_size += e.second.GetSendOffset();
         }
         return cur_size + bufLen <= max_send_size;
+    }
+
+    bool ShouldIncStreamNumLimit() {
+        return this->streamIDToStream.size() >= this->max_recv_stream_num * FLOW_CONTROL_THRESH;
     }
 
    private:
@@ -1000,6 +1004,7 @@ class Connection {
     uint64_t max_send_size = MAX_CONNECTION_SIZE; // max (sum of offset of all the sending streams)
     uint64_t max_recv_stream_num = MAX_STREAM_NUM; // maximum number of receiving streams
     uint64_t max_send_stream_num = MAX_STREAM_NUM; // maximum number of sending streams
+    //TODO: account for closed stream final size
 
 };
 

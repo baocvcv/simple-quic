@@ -590,9 +590,22 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 }
                 // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 2", _recPktNum);
                 if (foundCon->IsStreamIDUsed(streamID) == false) {
+                    //TODO: check if stream can be increased
+
+                    // Stream NOT used
+                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 4", _recPktNum);
+                    if (foundCon->InsertStream(streamID, true) == -1) {
+                        utils::logger::error("Too many streams, closing the connection");
+                        this->CloseConnection(conSeq, "Stream limit exceeded", TransportErrorCodes::STREAM_LIMIT_ERROR);
+                    }
+                    // Stream READY
+                    // utils::logger::info("conseq = {}, streamid = {}", conSeq, streamID);
+                    this->streamReadyCallback(conSeq, streamID);
+                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 6", _recPktNum);
+
                     //TODO: check if stream_num should be increased
-                    //TODO: differentiate uni and bi directional streams
-                    if (foundCon->ShouldIncRecvLimit()) {
+                    if (foundCon->ShouldIncStreamNumLimit()) {
+                        utils::logger::warn("Increasing stream num limit");
                         auto params = foundCon->GetFlowControlParams();
                         auto fr = std::make_shared<payload::MaxStreamsFrame>(std::get<2>(params) * 2, false);
                         uint64_t _usePktNum = foundCon->GetNewPktNum();
@@ -608,13 +621,6 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                         // ACTIVE end to close the stream --- need ack
                         foundCon->AddWhetherNeedACK(true);
                     }
-                    // Stream NOT used
-                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 4", _recPktNum);
-                    foundCon->InsertStream(streamID, true);
-                    // Stream READY
-                    // utils::logger::info("conseq = {}, streamid = {}", conSeq, streamID);
-                    this->streamReadyCallback(conSeq, streamID);
-                    // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 6", _recPktNum);
                 }
                 // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 3", _recPktNum);
                 auto buf = streamFrm->FetchBuffer();
@@ -623,8 +629,10 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 uint8_t fin = streamFrm->FINFlag();
                 Stream& _nowStream = foundCon->GetStreamByID(streamID);
                 // check flow control
-                if (!_nowStream.IsRecPermitted(bufOffset, buflen)) {
-                    //TODO: if offset goes off limit send error frame
+                if (!_nowStream.IsRecPermitted(bufOffset, buflen) || !foundCon->IsRecvPermitted(buflen)) {
+                    //TODO: if offset goes off limit close connection
+                    utils::logger::error("Stream/Connection limit exceeded, closing connection");
+                    this->CloseConnection(conSeq, "Flow control condition violated", TransportErrorCodes::FLOW_CONTROL_ERROR);
                     continue;
                 }
 
@@ -652,6 +660,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
 
                 if (_nowStream.ShouldIncRecvLimit()) {
                     //TODO: check if stream size should                        auto params = foundCon->GetFlowControlParams();
+                    utils::logger::warn("Increasing stream offset limit");
                     uint64_t cur_limit = _nowStream.GetFlowControlParams().first;
                     auto fr = std::make_shared<payload::MaxStreamDataFrame>(streamID, cur_limit * 1.414);
                     uint64_t _usePktNum = foundCon->GetNewPktNum();
@@ -668,6 +677,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     foundCon->AddWhetherNeedACK(true);
                 }
                 if (foundCon->ShouldIncRecvLimit()) {
+                    utils::logger::warn("Increasing connection offset limit");
                     uint64_t cur_limit = std::get<0>(foundCon->GetFlowControlParams());
                     auto fr = std::make_shared<payload::MaxDataFrame>(cur_limit * 1.414);
                     uint64_t _usePktNum = foundCon->GetNewPktNum();
@@ -812,6 +822,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 foundCon->remNeedACKPkt(_recACKInS); // remove the sent packages that need ACK.
                 foundCon->AddAckedSentPktNum(_recACKInS);
             } else if (frm->Type() == payload::FrameType::MAX_DATA) {
+                utils::logger::info("Received MAX_DATA frame");
                 const ConnectionID& localConID = shHdr->GetDstID();
                 
                 std::shared_ptr<Connection> foundCon = nullptr;
@@ -835,6 +846,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     haveAddedToACK = true;
                 }
             } else if (frm->Type() == payload::FrameType::MAX_STREAM_DATA) {
+                utils::logger::info("Received MAX_STREAM_DATA frame");
                 const ConnectionID& localConID = shHdr->GetDstID();
                 
                 std::shared_ptr<Connection> foundCon = nullptr;
@@ -858,6 +870,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     haveAddedToACK = true;
                 }
             } else if (frm->Type() == payload::FrameType::MAX_STREAMS) {
+                utils::logger::info("Received MAX_STREAMS frame");
                 const ConnectionID& localConID = shHdr->GetDstID();
                 
                 std::shared_ptr<Connection> foundCon = nullptr;
