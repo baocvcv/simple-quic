@@ -5,16 +5,22 @@
 #include <set>
 #include <map>
 #include <sys/time.h>
+#include <tuple>
 
 #define min(a,b) (((a)<(b))?(a):(b))
 #define max(a,b) (((a)>(b))?(a):(b))
 
 namespace thquic::context {
 
-constexpr uint64_t MAX_STREAM_NUM = 32;
+// TODO: some of these are changeable for flow control
 constexpr uint64_t MAX_CONNECTION_NUM = 1000;
+constexpr uint64_t MAX_STREAM_NUM = 32;
 constexpr uint64_t MAX_PACKET_LENGTH = 1080; // SET maximum packet length to 1000 (Bytes?)
 constexpr uint64_t MAX_PACKET_DATA_LENGTH = 1024;
+constexpr uint64_t MAX_STREAM_OFFSET = 10240;
+constexpr uint64_t MAX_CONNECTION_SIZE = MAX_STREAM_NUM * MAX_STREAM_OFFSET;
+
+constexpr float FLOW_CONTROL_THRESH = 0.8;
 
 enum class StreamState {
     UNDEFINED,
@@ -22,6 +28,7 @@ enum class StreamState {
     FIN,   // sec 17.2.3
 };
 
+// TODO: more states for parameter exchange
 enum class ConnectionState {
     CREATED,
     ESTABLISHED,    // sec 17.2.2
@@ -35,6 +42,8 @@ enum class CongestionState {
     RECOVERY,
     CONGESTION_AVOIDANCE,
 };
+
+//TODO: enum for flow control
 
 // const int MAX_ACK_DELAY = 25;
 
@@ -55,7 +64,7 @@ struct ACKTimer {
 
 class Stream {
     public:
-        Stream() { myState = StreamState::UNDEFINED; }
+        Stream(): myState(StreamState::UNDEFINED) {}
         Stream(uint64_t _streamID, StreamState _state) {
             this->streamID = _streamID;
             this->myState = _state;
@@ -77,6 +86,14 @@ class Stream {
             return this->myState;
         }
 
+        void SetMaxSendOffset(uint64_t _max_offset) {
+            this->max_send_offset = _max_offset;
+        }
+
+        bool IsSendPermitted(uint64_t sentBufLen) {
+            return this->_offset + sentBufLen <= this->max_send_offset;
+        }
+
         uint64_t GetUpdateOffset(uint64_t sentBufLen) {
             uint64_t nowOffset = this->_offset;
             this->_offset += sentBufLen;
@@ -85,6 +102,14 @@ class Stream {
 
         bool WhetherTpUper(uint64_t recOffset) {
             return this->expOffset == recOffset;
+        }
+
+        void SetMaxRecvOffset(uint64_t _max_offset) {
+            this->max_recv_offset = _max_offset;
+        }
+
+        bool IsRecPermitted(uint64_t off, uint64_t recBufLen) {
+            return off + recBufLen <= this->max_recv_offset;
         }
 
         void UpdateExpOffset(uint64_t recBufLen) {
@@ -151,10 +176,27 @@ class Stream {
             return this->bufferedStream.size();
         }
 
+        std::pair<uint64_t, uint64_t> GetFlowControlParams() {
+            return {max_recv_offset, max_send_offset};
+        }
+
+        uint64_t GetSendOffset() {
+            return this->_offset;
+        }
+
+        uint64_t GetRecvOffset() {
+            return this->expOffset;
+        }
+
+        bool ShouldIncRecvLimit() {
+            return this->expOffset >= max_recv_offset * FLOW_CONTROL_THRESH;
+        }
+
     private:
         uint64_t streamID;
         StreamState myState;
         StreamDataReadyCallbackType streamDataReadyCallback;
+        //TODO: which direction?
         bool bidirectional;
         uint64_t _offset = 0;
         uint64_t expOffset = 0;
@@ -162,6 +204,8 @@ class Stream {
         std::vector<uint64_t> bufferedOffset;
         std::vector<uint64_t> bufferedLen;
         std::vector<bool> bufferedFin;
+        uint64_t max_recv_offset = 0;
+        uint64_t max_send_offset = 0;
 };
 
 class Connection {
@@ -182,7 +226,10 @@ class Connection {
         rtt_var = INITIAL_RTT / 2;
         min_rtt = 0;
         first_rtt_sample = 0;
-        larget_acked_packet = 0xffffffffUL;
+        larget_acked_packet = 0xffffffffUL;  
+        max_recv_stream_offset = MAX_STREAM_OFFSET;
+        max_recv_stream_offset = MAX_CONNECTION_SIZE;
+        max_recv_stream_num = MAX_STREAM_NUM;
     }
 
     void SetConnectionState(ConnectionState _sta) {
@@ -206,8 +253,12 @@ class Connection {
         throw std::runtime_error("Connection descriptor exhausted!");*/
     }
 
+    bool ShouldIncStreamNumLimit() {
+        return this->streamIDToStream.size() >= this->max_recv_stream_num * FLOW_CONTROL_THRESH;
+    }
+
     uint64_t GenerateStreamID(PeerType type, bool bidirectional) {
-        for (uint64_t i = 0; i < MAX_STREAM_NUM; i++) {
+        for (uint64_t i = 0; i < this->max_send_stream_num; i++) {
             // step1: form a streamID
             uint64_t streamID = 0x0;
             if(type != PeerType::CLIENT)
@@ -220,6 +271,8 @@ class Connection {
             if (insertRes.second) {
                 this->streamState[i] = StreamState::RUNNING;
                 this->streamIDToStream[i] = Stream(i, StreamState::RUNNING);
+                this->streamIDToStream[i].SetMaxRecvOffset(this->max_recv_stream_offset);
+                this->streamIDToStream[i].SetMaxSendOffset(this->max_send_stream_offset);
                 return (((i<<2)&0xFFFFFFFFFFFFFFFC)|type);
             }
         }
@@ -229,6 +282,18 @@ class Connection {
     void SetStreamFeature(uint64_t streamID, bool bidirectional) {
         this->streamFeature[streamID] = bidirectional;
         this->streamIDToStream[streamID].SetBidirectional(bidirectional);
+    }
+
+    void SetStreamMaxRecvOffset(uint64_t streamID, uint64_t max_offset) {
+        this->streamIDToStream[streamID].SetMaxRecvOffset(max_offset);
+    }
+
+    void SetStreamMaxSendOffset(uint64_t streamID, uint64_t max_offset) {
+        this->streamIDToStream[streamID].SetMaxSendOffset(max_offset);
+    }
+
+    std::pair<uint64_t, uint64_t> GetStreamFlowControlParams(uint64_t streamID) {
+        return this->streamIDToStream[streamID].GetFlowControlParams();
     }
 
     void CloseStreamByID(uint64_t streamID) {
@@ -265,6 +330,8 @@ class Connection {
             return -1; // has existed in this connection
         }
         this->streamIDToStream[streamID] = Stream(streamID, StreamState::RUNNING);
+        this->streamIDToStream[streamID].SetMaxRecvOffset(this->max_recv_stream_offset);
+        this->streamIDToStream[streamID].SetMaxSendOffset(this->max_send_stream_offset);
         this->streamFeature[streamID] = bidirectional;
         this->streamState[streamID] = StreamState::RUNNING;
         return 0;
@@ -306,7 +373,10 @@ class Connection {
             auto pld = pkt->GetPktPayload();
             for (auto frm: pld->GetFrames()) {
                 // Just STREAM frames are needed to be calculated or orther frames?
-                if (frm->Type() == payload::FrameType::STREAM || frm->Type() == payload::FrameType::MAX_STREAMS || frm->Type() == payload::FrameType::MAX_STREAM_DATA) {
+                //TODO: only count stream packets?
+                if (frm->Type() == payload::FrameType::STREAM
+                        || frm->Type() == payload::FrameType::MAX_STREAMS
+                        || frm->Type() == payload::FrameType::MAX_STREAM_DATA) {
                     std::shared_ptr<payload::StreamFrame> strmFrm = std::dynamic_pointer_cast<payload::StreamFrame>(frm);
                     if (strmFrm->StreamID() == streamID) {
                         totLen += frm->EncodeLen();
@@ -367,6 +437,7 @@ class Connection {
         // this->notACKedSentPkt.push_back(ACKTimer{pn, MAX_RTT});
     }
     
+    //TODO: read this
     void remNeedACKPkt(utils::IntervalSet _recACKInterval) {
         // REMOVE packets that have already been acked from the notACKedSentPkt
         // DO NOT need to remove it from the sentpkt
@@ -412,6 +483,34 @@ class Connection {
                         this->onFlight -= _nns.pktLen; // DECREASE the onflight packet size;
                     else this->onFlight = 0;
                     this->UpdateCongestionWindowByACK(_nns.pktLen); // UPDATE congestionWindow based on the current congestionState;
+                }
+
+                // update flow control params
+                //TODO: check effectiveness
+                auto pkt = this->GetSentPktByIdx(_nns.idx);
+                if (pkt->GetPacketType() == payload::PacketType::ONE_RTT) {
+                    auto hdr = std::dynamic_pointer_cast<payload::ShortHeader>(pkt->GetPktHeader());
+                    auto  recPld = pkt->GetPktPayload();
+                    for (auto frm: recPld->GetFrames()) {
+                        switch (frm->Type())
+                        {
+                        case payload::FrameType::MAX_DATA: {
+                            auto _maxDataFrm = std::dynamic_pointer_cast<payload::MaxDataFrame>(frm);
+                            this->SetMaxSendSize(_maxDataFrm->GetMaximumData());
+                            break;
+                        }
+                        case payload::FrameType::MAX_STREAM_DATA: {
+                            auto _maxDataFrm = std::dynamic_pointer_cast<payload::MaxStreamDataFrame>(frm);
+                            this->SetStreamMaxSendOffset(_maxDataFrm->StreamID(), _maxDataFrm->GetMaximumStreamData());
+                            break;
+                        }
+                        case payload::FrameType::MAX_STREAMS: {
+                            auto _maxDataFrm = std::dynamic_pointer_cast<payload::MaxStreamsFrame>(frm);
+                            this->SetMaxSendStreamNum(_maxDataFrm->GetStreamsNum());
+                            break;
+                        }
+                        }
+                    }
                 }
             }
         }
@@ -690,6 +789,7 @@ class Connection {
         // }
     }
 
+    // TODO: add conditions here
     bool WhetherCanSendPkt(uint64_t _toSendPktLen) {
         // utils::logger::info("On flight pkt length = {}, to send pkt num = {}, congestion window = {}", 
         //                     this->onFlight, _toSendPktLen, this->congestionWindow);
@@ -718,24 +818,34 @@ class Connection {
         uint8_t* tmpBufArr = tmpBuf.get();
         uint64_t tmpBufLen = this->unsentBufLen[0];
         uint64_t toSendBufLen = min(tmpBufLen, MAX_PACKET_DATA_LENGTH);
+        uint64_t strmID = this->unsentBufStreamID[0];
+        // flow control, check both stream and connection limits
+        if (!this->GetStreamByID(strmID).IsSendPermitted(toSendBufLen) 
+                || !this->IsSendPermitted(toSendBufLen)) {
+            //TODO: optionally create an STREAM_DATA_BLOCKED frame
+            return nullptr;
+        }
+
         // uint8_t toSendBuf[MAX_PACKET_DATA_LENGTH];
         std::unique_ptr<uint8_t[]> toSendBuf = std::make_unique<uint8_t[]>(toSendBufLen);
-        
         memcpy(toSendBuf.get(), tmpBufArr, toSendBufLen);
         tmpBufLen -= toSendBufLen;
-        uint64_t strmID = this->unsentBufStreamID[0];
-        bool _fin = this->unsentBufFin[0];
+        //TODO: if divided into smaller chunks, should fin only be true on the last chunk?
+        // bool _fin = this->unsentBufFin[0];
+        bool _fin;
         if (tmpBufLen <= 0) {
             this->unsentBuf.erase(this->unsentBuf.begin());
             this->unsentBufStreamID.erase(this->unsentBufStreamID.begin());
             this->unsentBufLen.erase(this->unsentBufLen.begin());
             this->unsentBufFin.erase(this->unsentBufFin.begin());
+            _fin = this->unsentBufFin[0];
         } else {
             tmpBufArr += toSendBufLen;
             std::unique_ptr<uint8_t[]> aftBuf = std::make_unique<uint8_t[]>(tmpBufLen);
             memcpy(aftBuf.get(), tmpBufArr, tmpBufLen);
             this->unsentBuf[0] = std::move(aftBuf);
             this->unsentBufLen[0] = tmpBufLen;
+            _fin = false;
         }
 
         uint64_t nowOffset = this->GetStreamByID(strmID).GetUpdateOffset(toSendBufLen);
@@ -759,6 +869,61 @@ class Connection {
         return pk;
     }
 
+    void SetMaxRecvStreamOff(uint64_t max_offset) {
+        this->max_recv_stream_offset = max_offset;
+    }
+
+    void SetMaxSendStreamOff(uint64_t max_offset) {
+        this->max_send_stream_offset = max_offset;
+    }
+
+    void SetMaxRecvSize(uint64_t max_size) {
+        this->max_recv_size = max_size;
+    }
+
+    void SetMaxSendSize(uint64_t max_size) {
+        this->max_send_size = max_size;
+    }
+
+    void SetMaxRecvStreamNum(uint64_t max_num) {
+        this->max_recv_stream_num = max_num;
+    }
+
+    void SetMaxSendStreamNum(uint64_t max_num) {
+        this->max_send_stream_num = max_num;
+    }
+
+    std::tuple<uint64_t, uint64_t, uint64_t> GetFlowControlParams() {
+        return {max_recv_stream_offset, max_recv_size, max_recv_stream_num};
+    }
+
+    bool ShouldIncStreamRecvLimit(uint64_t strmID) {
+        return this->streamIDToStream[strmID].ShouldIncRecvLimit();
+    }
+
+    bool ShouldIncRecvLimit() {
+        uint64_t cur_size = 0;
+        for (auto& e: this->streamIDToStream) {
+            cur_size += e.second.GetRecvOffset();
+        }
+        return cur_size <= max_recv_size * FLOW_CONTROL_THRESH;
+    }
+
+    bool IsRecvPermitted(uint64_t bufLen) {
+        uint64_t cur_size = 0;
+        for (auto& e: this->streamIDToStream) {
+            cur_size += e.second.GetRecvOffset();
+        }
+        return cur_size + bufLen <= max_recv_size;
+    }
+
+    bool IsSendPermitted(uint64_t bufLen) {
+        uint64_t cur_size = 0;
+        for (auto& e: this->streamIDToStream) {
+            cur_size += e.second.GetSendOffset();
+        }
+        return cur_size + bufLen <= max_send_size;
+    }
 
    private:
     
@@ -815,11 +980,27 @@ class Connection {
     uint64_t larget_acked_packet;
     uint64_t loss_time;
 
+    // congestion control
     uint64_t congestionWindow;
     uint64_t congestionThreshold;
     CongestionState congestionState;
     uint64_t onFlight;
     uint64_t threeTimesACK;
+
+    // flow control
+    // uint64_t max_recv_stream_offset; // default max_recv_offset for each stream
+    // uint64_t max_send_stream_offset = 0; // default max_send_offset for each stream
+    // uint64_t max_recv_size; // max (sum of offset of all the receiving streams)
+    // uint64_t max_send_size = 0; // max (sum of offset of all the sending streams)
+    // uint64_t max_recv_stream_num; // maximum number of receiving streams
+    // uint64_t max_send_stream_num = 0; // maximum number of sending streams
+    uint64_t max_recv_stream_offset = MAX_STREAM_OFFSET; // default max_recv_offset for each stream
+    uint64_t max_send_stream_offset = MAX_STREAM_OFFSET; // default max_send_offset for each stream
+    uint64_t max_recv_size = MAX_CONNECTION_SIZE; // max (sum of offset of all the receiving streams)
+    uint64_t max_send_size = MAX_CONNECTION_SIZE; // max (sum of offset of all the sending streams)
+    uint64_t max_recv_stream_num = MAX_STREAM_NUM; // maximum number of receiving streams
+    uint64_t max_send_stream_num = MAX_STREAM_NUM; // maximum number of sending streams
+
 };
 
 uint64_t Connection::connectionDescriptor = 0;
