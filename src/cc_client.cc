@@ -50,8 +50,7 @@ class Client {
             thquic::utils::logger::warn(
                 "[APP] peer unexpectedly close the stream");
             thquic::utils::logger::warn("[APP] close the connection");
-            client.CloseConnection(sequence, std::string("unexpected close"),
-                                   -1);
+            client.CloseConnection(sequence, std::string("unexpected close"),1);
             return 0;
         }
 

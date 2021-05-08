@@ -46,7 +46,7 @@ class PingPongClient {
         if (FIN) {
             thquic::utils::logger::warn("[APP] peer close the stream as well");
             thquic::utils::logger::warn("[APP] close the connection");
-            client.CloseConnection(sequence, std::string("pingpong finish"), 0);
+            client.CloseConnection(sequence, std::string("pingpong finish"), 1);
             return 0;
         }
 

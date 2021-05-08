@@ -41,7 +41,8 @@ enum class CongestionState {
 int INITIAL_RTT = 500;//msec
 int kPacketThreshold = 3;
 float kTimeThreshold = (9/8);
-uint64_t kGranularity = 1;//msec
+uint64_t kGranularity = 100;//msec
+uint64_t IDLE_TIMEOUT_TIME = 10;//*1000; // msec => 10s
 // int INITIAL_SPACE = 0;
 // int HANDSHAKE_SPACE = 1;
 // int APPLICATIONDATA_SPACE = 2;
@@ -188,6 +189,8 @@ class Connection {
         min_rtt = 0;
         first_rtt_sample = 0;
         larget_acked_packet = 0xffffffffUL;
+        this->updatePTO();
+        this->updateIdleTime(true); // no_ack_elicity_packet_sent = true
     }
 
     void SetConnectionState(ConnectionState _sta) {
@@ -252,6 +255,15 @@ class Connection {
 
     void AddPacketACKCallback(SentPktACKedCallbackType clb) {
         this->pendingPacketsCallback.push_back(clb);
+    }
+
+    void AddPacket_to_front(std::shared_ptr<payload::Packet> pk) {
+        this->pendingPackets.push_front(pk);
+        this->toSendPktNum.AddInterval(pk->GetPktNum(), pk->GetPktNum());
+    }
+
+    void AddPacketACKCallback_to_front(SentPktACKedCallbackType clb) {
+        this->pendingPacketsCallback.push_front(clb);
     }
 
     void SetStreamDataReadyCallbackByStreamID(uint64_t _stid, StreamDataReadyCallbackType _srcb) {
@@ -677,6 +689,25 @@ class Connection {
         this->PTO =  this->smoothed_rtt + max(4*rtt_var, kGranularity) + latest_rtt;
     }
 
+    void updateIdleTime(bool ack_elicited) {
+        struct timeval curTime;
+        gettimeofday(&curTime, nullptr);
+        this->idle_time = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
+        this->no_ack_elicity_packet_sent = ack_elicited;
+    }
+
+    bool GetNoAckElicitPacketSentState() {
+        return this->no_ack_elicity_packet_sent;
+    }
+
+    // void SetNoAckElicitPacketSentState(bool value) {
+    //     this->no_ack_elicity_packet_sent = value;
+    // }
+
+    uint64_t getIdleTimeoutTime() {
+        return this->idle_time + IDLE_TIMEOUT_TIME;
+    }
+
     uint64_t getConnectionRTT() {
         return this->latest_rtt;
     }
@@ -851,11 +882,17 @@ class Connection {
 
     //PTO related
     uint64_t  PTO; // = smoothed_rtt + max(4*rtt_var, kGranularity) + max_ack_delay
+    
+    // Congestion
     uint64_t congestionWindow;
     uint64_t congestionThreshold;
     CongestionState congestionState;
     uint64_t onFlight;
     uint64_t threeTimesACK;
+
+    // Idle Timeout
+    uint64_t idle_time; // the time that last received or sent a packet
+    bool no_ack_elicity_packet_sent;
 };
 
 uint64_t Connection::connectionDescriptor = 0;
