@@ -274,7 +274,7 @@ int QUIC::SocketLoop() {
 
             // if nothing to send, send a packet with only a ping frame
             if ((PTO_expired) && (pendingPackets.empty() || connection.second->GetPendingPackageNeedACK() == false)) {
-                utils::logger::info("PTO PendingPackets is emtpy or first one is not ack-eliciting, check the connectionState = {}",connection.second->GetConnectionState());                
+                // utils::logger::info("PTO PendingPackets is emtpy or first one is not ack-eliciting, check the connectionState = {}",connection.second->GetConnectionState());                
                 if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
                     connection.second->GetConnectionState() != ConnectionState::CLOSED) {
                     // send a Ping Frame
