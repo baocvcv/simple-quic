@@ -50,7 +50,8 @@ enum class CongestionState {
 int INITIAL_RTT = 500;//msec
 int kPacketThreshold = 3;
 float kTimeThreshold = (9/8);
-int kGranualarity = 1;//msec
+uint64_t kGranularity = 100;//msec
+uint64_t IDLE_TIMEOUT_TIME = 10*1000; // msec => 10s
 // int INITIAL_SPACE = 0;
 // int HANDSHAKE_SPACE = 1;
 // int APPLICATIONDATA_SPACE = 2;
@@ -60,6 +61,11 @@ struct ACKTimer {
    uint64_t remTime;
    uint64_t idx;
    uint64_t pktLen; // Bytes?
+};
+
+struct PTOTimer {
+    uint64_t pktNum;
+    uint64_t PTO_expire_time;
 };
 
 class Stream {
@@ -225,13 +231,15 @@ class Connection {
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
         // TODO::what is reset of loss_detection_timer??
-        loss_detection_timer_msec = curTime.tv_sec * 1000;
+        loss_detection_timer_msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
         latest_rtt = 0;
         smoothed_rtt = INITIAL_RTT;
         rtt_var = INITIAL_RTT / 2;
         min_rtt = 0;
         first_rtt_sample = 0;
         larget_acked_packet = 0xffffffffUL;  
+        this->updatePTO();
+        this->updateIdleTime(true); // no_ack_elicity_packet_sent = true
         // max_recv_stream_offset = MAX_STREAM_OFFSET;
         // max_recv_stream_offset = MAX_CONNECTION_SIZE;
         // max_recv_stream_num = MAX_STREAM_NUM;
@@ -313,6 +321,15 @@ class Connection {
 
     void AddPacketACKCallback(SentPktACKedCallbackType clb) {
         this->pendingPacketsCallback.push_back(clb);
+    }
+
+    void AddPacket_to_front(std::shared_ptr<payload::Packet> pk) {
+        this->pendingPackets.push_front(pk);
+        this->toSendPktNum.AddInterval(pk->GetPktNum(), pk->GetPktNum());
+    }
+
+    void AddPacketACKCallback_to_front(SentPktACKedCallbackType clb) {
+        this->pendingPacketsCallback.push_front(clb);
     }
 
     void SetStreamDataReadyCallbackByStreamID(uint64_t _stid, StreamDataReadyCallbackType _srcb) {
@@ -424,7 +441,7 @@ class Connection {
 
     void addNeedACKSentPkt(std::shared_ptr<payload::Packet> needACKPkt) {
         uint64_t pn = needACKPkt->GetPktNum();
-        // ADD to the received package vector
+        // ADD to the sent package vector
         // this->recPkt.push_back(needACKPkt);
         // uint64_t idx = this->recPkt.size();
         // GET the rem time that is needed for the ACKTimer construction
@@ -439,6 +456,8 @@ class Connection {
         gettimeofday(&curTime, nullptr);
         uint64_t msec = curTime.tv_sec * 1000; // / 1000;
         this->notACKedSentPkt.push_back(ACKTimer{pn, msec, _sentIdx, needACKPkt->EncodeLen()});
+        uint64_t msec_pto = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
+        this->notACKedSentPktPTO.push_back(PTOTimer{pn,PTO+msec_pto});
         // this->notACKedSentPkt.push_back(ACKTimer{pn, MAX_RTT});
     }
     
@@ -458,13 +477,16 @@ class Connection {
         }
         printf("\n");*/
         std::list<ACKTimer> newNotACKedSentPkt;
+        std::list<PTOTimer> newNotACKedSentPktPTO;
         std::map<uint64_t,uint64_t> newlatestACKedSentPktNum;
         newNotACKedSentPkt.clear();
+        newNotACKedSentPktPTO.clear();
         newlatestACKedSentPktNum.clear();
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
-        uint64_t msec = curTime.tv_sec * 1000; // / 1000;
+        uint64_t msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
         utils::IntervalSet _addedToNewACKedPktNum;
+        int count = 0;
         utils::IntervalSet _addedToLastestNeedAckPktNum;
         bool _isPacketMiss = false;
         bool _haveNotACKed = false;
@@ -473,7 +495,14 @@ class Connection {
             if (!_recACKInterval.Contain(_nns.pktNum) && !_addedToNewACKedPktNum.Contain(_nns.pktNum)) {
                 newNotACKedSentPkt.push_back(ACKTimer{_nns.pktNum, msec, _nns.idx, _nns.pktLen});
                 _addedToNewACKedPktNum.AddInterval(_nns.pktNum, _nns.pktNum);
-                _haveNotACKed = true;
+                int iterator_count = 0;
+                for(auto _nnsPTO: this->notACKedSentPktPTO) {
+                    if(iterator_count==count) {
+                        newNotACKedSentPktPTO.push_back(_nnsPTO);                        
+                        break;
+                    }
+                    iterator_count++;
+                }
             } else if (!_addedToNewACKedPktNum.Contain(_nns.pktNum)) {
                 // printf("%d ", _nns.pktNum);
                 newlatestACKedSentPktNum[_nns.pktNum] = _nns.remTime;
@@ -519,9 +548,12 @@ class Connection {
                 //     }
                 // }
             }
+            count++;
         }
         this->notACKedSentPkt.clear();
         this->notACKedSentPkt = newNotACKedSentPkt;
+        this->notACKedSentPktPTO.clear();
+        this->notACKedSentPktPTO = newNotACKedSentPktPTO;
 
         if (_isPacketMiss && this->curState == ConnectionState::ESTABLISHED) {
             this->PacketMissCallback(); // SET the congestionThreshold to the half of the current congestionWindow; SET congestionWindow to MAX_PACKET_LENGTH; SET congestionState;
@@ -596,7 +628,7 @@ class Connection {
         utils::IntervalSet _notACKInS;
         struct timeval curTime;
         gettimeofday(&curTime, nullptr);
-        uint64_t msec = curTime.tv_usec; // / 1000;
+        uint64_t msec = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
         std::list<ACKTimer> newNotACKedRecPkt;
         for (auto _notACKPkt: this->notACKedRecPkt) {
             uint64_t pn = _notACKPkt.pktNum;
@@ -732,7 +764,7 @@ class Connection {
                 // TODO:: "IncludesAckEliciting(newly_acked_packets)" for case in "if" above
                 struct timeval curTime;
                 gettimeofday(&curTime,nullptr);
-                this->latest_rtt = curTime.tv_sec * 1000 - larget_new_acked_packets_sent_time;
+                this->latest_rtt = curTime.tv_sec * 1000 + curTime.tv_usec / 1000 - larget_new_acked_packets_sent_time;
                 if(first_rtt_sample == 0) {
                     min_rtt = latest_rtt;
                     smoothed_rtt = latest_rtt;
@@ -751,11 +783,43 @@ class Connection {
                 }
             }
         }
+        updatePTO();
+    }
+
+    void initPTO() {
+        this->PTO = 0;
+    }
+
+    void updatePTO() {
+        this->PTO =  this->smoothed_rtt + max(4*rtt_var, kGranularity) + latest_rtt;
+    }
+
+    void updateIdleTime(bool ack_elicited) {
+        struct timeval curTime;
+        gettimeofday(&curTime, nullptr);
+        this->idle_time = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
+        this->no_ack_elicity_packet_sent = ack_elicited;
+    }
+
+    bool GetNoAckElicitPacketSentState() {
+        return this->no_ack_elicity_packet_sent;
+    }
+
+    // void SetNoAckElicitPacketSentState(bool value) {
+    //     this->no_ack_elicity_packet_sent = value;
+    // }
+
+    uint64_t getIdleTimeoutTime() {
+        return this->idle_time + IDLE_TIMEOUT_TIME;
     }
 
     uint64_t getConnectionRTT() {
         return this->latest_rtt;
     }
+
+    std::list<PTOTimer> GetPTOTimers() {
+        return this->notACKedSentPktPTO;
+    }    
 
     void InitCongestionState(uint64_t _initCW, uint64_t _initThreshold) {
         this->congestionWindow = _initCW;
@@ -874,7 +938,7 @@ class Connection {
                                                     nowOffset, true, _fin);
         
         uint64_t _usePktNum = this->GetNewPktNum();
-        utils::logger::info("Sending data with packet number = {}, len = {}. fin = {}", _usePktNum, 
+        utils::logger::info("in Connection::GetDataFromUnsendBuf::Sending data with packet numbeer = {}, len = {}. fin = {}", _usePktNum, 
                             toSendBufLen, _fin);
         uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
         // pktNumLen | dstConID | pktNum
@@ -992,6 +1056,7 @@ class Connection {
     std::list<ACKTimer> notACKedRecPkt;
     std::list<ACKTimer> notACKedSentPkt;
     std::map<uint64_t,uint64_t> latestACKedSentPktNum;
+    std::list<PTOTimer> notACKedSentPktPTO;
     
 
     utils::IntervalSet tmpRecACKInterval;
@@ -1010,7 +1075,10 @@ class Connection {
     uint64_t larget_acked_packet;
     uint64_t loss_time;
 
-    // congestion control
+    //PTO related
+    uint64_t  PTO; // = smoothed_rtt + max(4*rtt_var, kGranularity) + max_ack_delay
+    
+    // Congestion
     uint64_t congestionWindow;
     uint64_t congestionThreshold;
     CongestionState congestionState;
@@ -1032,6 +1100,9 @@ class Connection {
     uint64_t max_send_stream_num = MAX_STREAM_NUM; // maximum number of sending streams
     //TODO: account for closed stream final size
 
+    // Idle Timeout
+    uint64_t idle_time; // the time that last received or sent a packet
+    bool no_ack_elicity_packet_sent;
 };
 
 uint64_t Connection::connectionDescriptor = 0;

@@ -1,0 +1,27 @@
+Probe Timeout测试：
+1）调整 IDLE_TIMEOUT_TIME = 10*1000。（简化RFC中握手交换数据的逻辑）
+
+2）无损网络下：
+运行 ./THQUIC_cc_server 和 ./THQUC_cc_client
+多运行几次可以看到 server 显示 “PTO Sending ping frame packet with packet numbeer = 19, DstID = 0hmni5uo”，然后 client 接收到 “Receive a ONE-RTT packet with packet number = 19 \n [08:16:00 +08:00] [info] Got a ping frame from the one-rtt packet. \n [08:16:00 +08:00] [info] Got a ping frame from the one-rtt packet, DstID = 0hmni5uo”，说明成功接受 Probe。
+
+3）有损网络下：
+同上。
+
+
+（问题：可能State不对？）
+
+
+Idle Timeout测试：
+1）调整 IDLE_TIMEOUT_TIME = 10。（虽然不合理，但是加快进度）
+
+2）无损网络下：
+运行 ./THQUIC_cc_server 和 ./THQUC_cc_client
+可以看到 idle timeout 被 defer 成功。能够正常传递结束
+
+3）有损网络下：
+sudo tc qdisc add dev lo root netem delay 200ms 20ms distribution normal loss 30% //开启有损网络
+运行 ./THQUIC_cc_server 和 ./THQUC_cc_client
+观察：server显示 “idle timeout and need to defer”，但是client会有 “client idle timeout and do not need to defer” 所以就直接 “Deregister connection 0” 然后进入 “connectionState = 4”。很可能server想要ping以下但是没用了（这方已经关了）
+（注意看server对于 “Sending ping frame packet with packet numbeer = 29, DstID = dl5pp10j” 的尝试，再去对面找对应的 packet number 和处理情况）
+sudo tc qdisc del dev lo root netem //关闭
