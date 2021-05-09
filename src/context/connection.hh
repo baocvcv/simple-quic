@@ -813,6 +813,10 @@ class Connection {
         return this->idle_time + IDLE_TIMEOUT_TIME;
     }
 
+    uint64_t getIdleTimeoutTime_no_defer() {
+        return this->idle_time + IDLE_TIMEOUT_TIME * 10;
+    }
+
     uint64_t getConnectionRTT() {
         return this->latest_rtt;
     }

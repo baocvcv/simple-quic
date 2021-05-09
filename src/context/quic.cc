@@ -240,13 +240,19 @@ int QUIC::SocketLoop() {
             /* Idle Time out */
             // deferring and dealing with idle timeout
             if(current_time > connection.second->getIdleTimeoutTime()) {
+                if(current_time > connection.second->getIdleTimeoutTime_no_defer()) {
+                    if(connection.second->GetConnectionState() != ConnectionState::CLOSED) {
+                        this->CloseConnection(connection_descriptor,"Idle Timeout, 10 times, no defer",1);
+                        connection.second->SetConnectionState(ConnectionState::CLOSED);
+                    }
+                }
                 // utils::logger::info("idle time out!");
                 auto notAckedSentPkt = connection.second->GetNotACKedSentPkt();
                 if(notAckedSentPkt.size() > 0) {                    
                     // defer idel timeout, send a PING packet
                     if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
                         connection.second->GetConnectionState() != ConnectionState::CLOSED) {
-                        utils::logger::info("idle timeout and need to defer");                
+                        utils::logger::info("idle timeout and need to defer, connection.second.state = {}",connection.second->GetConnectionState());                
                         // send a Ping Frame
                         uint64_t _usePktNum = connection.second->GetNewPktNum();
                         utils::logger::info("Sending ping frame packet with packet numbeer = {}, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
@@ -1091,19 +1097,19 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 utils::logger::info("Got a ping frame from the one-rtt packet, DstID = {}",localConID.ToString());
                 std::shared_ptr<Connection> foundCon = nullptr;
                 uint64_t conSeq;
-                bool skip_flag = false;
+                bool skip_flag = true;
                 // for (auto con: this->connections) {
                 //     utils::logger::info("[check connection count]::localConID = {}, con.second.conID = {}, connectionState = {}",localConID.ToString(),con.second->getLocalConnectionID().ToString(),con.second->GetConnectionState());                    
                 // }
                 for (auto con: this->connections) {
                     utils::logger::info("localConID = {}, con.second.conID = {}, connectionState = {}",localConID.ToString(),con.second->getLocalConnectionID().ToString(),con.second->GetConnectionState());                    
                     if(con.second->getLocalConnectionID() == localConID) {
-                        if(con.second->GetConnectionState() == ConnectionState::WAIT_FOR_PEER_CLOSE ||
-                           con.second->GetConnectionState() == ConnectionState::CLOSED) {
+                        if(con.second->GetConnectionState() != ConnectionState::PEER_ESTABLISHED) {
                             skip_flag = true;
                             break;
                         }
                         else {
+                            skip_flag = false;
                             foundCon = con.second;
                             conSeq = con.first;
                             break;

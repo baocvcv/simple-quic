@@ -9,9 +9,6 @@ Probe Timeout测试：
 同上。
 
 
-（问题：可能State不对？）
-
-
 Idle Timeout测试：
 1）调整 IDLE_TIMEOUT_TIME = 10。（虽然不合理，但是加快进度）
 
