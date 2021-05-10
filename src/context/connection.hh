@@ -314,6 +314,18 @@ class Connection {
         return this->streamIDToStream[_streamID].GetStreamState();
     }
 
+    bool checkValidStream() {
+        std::map<uint64_t,StreamState>::iterator i;
+        bool result = false;
+        for(i = this->streamState.begin(); i != streamState.end(); i++) {
+            if(i->second == StreamState::RUNNING) {
+                result = true;
+            }
+        }
+        // utils::logger::warn("check valid stream = {}", result);
+        return result;
+    }
+
     void AddPacket(std::shared_ptr<payload::Packet> pk) {
         this->pendingPackets.push_back(pk);
         this->toSendPktNum.AddInterval(pk->GetPktNum(), pk->GetPktNum());

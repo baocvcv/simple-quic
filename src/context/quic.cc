@@ -217,7 +217,7 @@ int QUIC::SocketLoop() {
         for (auto& connection : this->connections) {
             connection_descriptor++;
             // utils::logger::info("Now going to print the sent but not acked packets and rec but not acked packets");
-            
+            bool streamValid = connection.second->checkValidStream();
             // connection.second->PrintSentNeedACKPktNum();
             // connection.second->PrintRecNotACKPktNum();
             auto& pendingPackets = connection.second->GetPendingPackets();
@@ -240,45 +240,48 @@ int QUIC::SocketLoop() {
             /* Idle Time out */
             // deferring and dealing with idle timeout
             if(current_time > connection.second->getIdleTimeoutTime()) {
-                if(current_time > connection.second->getIdleTimeoutTime_no_defer()) {
-                    if(connection.second->GetConnectionState() != ConnectionState::CLOSED) {
-                        this->CloseConnection(connection_descriptor,"Idle Timeout, 10 times, no defer",1);
-                        connection.second->SetConnectionState(ConnectionState::CLOSED);
+                if(streamValid) {
+                    // if(current_time > connection.second->getIdleTimeoutTime_no_defer()) {
+                    //     if(connection.second->GetConnectionState() != ConnectionState::CLOSED) {
+                    //         this->CloseConnection(connection_descriptor,"Idle Timeout, 10 times, no defer",1);
+                    //         connection.second->SetConnectionState(ConnectionState::CLOSED);
+                    //     }
+                    // }
+                    // utils::logger::info("idle time out!");
+                    auto notAckedSentPkt = connection.second->GetNotACKedSentPkt();
+                    if(notAckedSentPkt.size() > 0) {                    
+                        // defer idel timeout, send a PING packet
+                        if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
+                            connection.second->GetConnectionState() != ConnectionState::CLOSED) {
+                            utils::logger::info("idle timeout and need to defer, connection.second.state = {}",connection.second->GetConnectionState());                
+                            // send a Ping Frame
+                            uint64_t _usePktNum = connection.second->GetNewPktNum();
+                            utils::logger::info("Sending ping frame packet with packet numbeer = {}, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
+                            uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
+                            // pktNumLen | dstConID | pktNum
+                            std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
+                                                                        connection.second->getRemoteConnectionID(), _usePktNum);
+                            utils::ByteStream emptyBys(nullptr, 0);
+                            std::shared_ptr<payload::Payload> pld = std::make_shared<payload::Payload>(emptyBys, 0);
+                            std::shared_ptr<payload::PingFrame> pingFrm = std::make_shared<payload::PingFrame>();
+                            pld->AttachFrame(pingFrm);
+                            std::shared_ptr<payload::Packet> pk = std::make_shared<payload::Packet>(shHdr, pld, connection.second->GetSockaddrTo());
+                            // auto newDatagram = QUIC::encodeDatagram(pk);
+                            // this->socket.sendMsg(newDatagram);
+                            // connection.second->UpdateOnFlightBySentPktLen(pk->EncodeLen());
+                            connection.second->AddPacket_to_front(pk);
+                            connection.second->AddWhetherNeedACK_to_front(true);
+                            connection.second->updateIdleTime(false);
+                        }
                     }
-                }
-                // utils::logger::info("idle time out!");
-                auto notAckedSentPkt = connection.second->GetNotACKedSentPkt();
-                if(notAckedSentPkt.size() > 0) {                    
-                    // defer idel timeout, send a PING packet
-                    if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
-                        connection.second->GetConnectionState() != ConnectionState::CLOSED) {
-                        utils::logger::info("idle timeout and need to defer, connection.second.state = {}",connection.second->GetConnectionState());                
-                        // send a Ping Frame
-                        uint64_t _usePktNum = connection.second->GetNewPktNum();
-                        utils::logger::info("Sending ping frame packet with packet numbeer = {}, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
-                        uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
-                        // pktNumLen | dstConID | pktNum
-                        std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
-                                                                    connection.second->getRemoteConnectionID(), _usePktNum);
-                        utils::ByteStream emptyBys(nullptr, 0);
-                        std::shared_ptr<payload::Payload> pld = std::make_shared<payload::Payload>(emptyBys, 0);
-                        std::shared_ptr<payload::PingFrame> pingFrm = std::make_shared<payload::PingFrame>();
-                        pld->AttachFrame(pingFrm);
-                        std::shared_ptr<payload::Packet> pk = std::make_shared<payload::Packet>(shHdr, pld, connection.second->GetSockaddrTo());
-                        // auto newDatagram = QUIC::encodeDatagram(pk);
-                        // this->socket.sendMsg(newDatagram);
-                        // connection.second->UpdateOnFlightBySentPktLen(pk->EncodeLen());
-                        connection.second->AddPacket_to_front(pk);
-                        connection.second->AddWhetherNeedACK_to_front(true);
-                    }
-                }
-                else {
-                    // idle timeout, send a CONNECTION_CLOSE frame immediately
-                    if( type == PeerType::CLIENT &&
-                        connection.second->GetConnectionState() != ConnectionState::CREATED &&
-                        connection.second->GetConnectionState() != ConnectionState::CLOSED) {
-                        utils::logger::info("client idle timeout and do not need to defer");                
-                        this->CloseConnection(connection_descriptor,"Idle Timeout",1);
+                    else {
+                        // idle timeout, send a CONNECTION_CLOSE frame immediately
+                        if( type == PeerType::CLIENT &&
+                            connection.second->GetConnectionState() != ConnectionState::CREATED &&
+                            connection.second->GetConnectionState() != ConnectionState::CLOSED) {
+                            utils::logger::info("client idle timeout and do not need to defer");                
+                            this->CloseConnection(connection_descriptor,"Idle Timeout",1);
+                        }
                     }
                 }
             }
@@ -287,7 +290,8 @@ int QUIC::SocketLoop() {
             if ((PTO_expired) && (pendingPackets.empty() || connection.second->GetPendingPackageNeedACK() == false)) {
                 // utils::logger::info("PTO PendingPackets is emtpy or first one is not ack-eliciting, check the connectionState = {}",connection.second->GetConnectionState());                
                 if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
-                    connection.second->GetConnectionState() != ConnectionState::CLOSED) {
+                    connection.second->GetConnectionState() != ConnectionState::CLOSED
+                    && streamValid) {
                     // send a Ping Frame
                     uint64_t _usePktNum = connection.second->GetNewPktNum();
                     utils::logger::info("PTO Sending ping frame packet with packet numbeer = {}, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
@@ -355,7 +359,7 @@ int QUIC::SocketLoop() {
                 // if (_ackRecFrm != nullptr)
                 //     pendingPackets.front()->GetPktPayload()->AttachFrame(_ackRecFrm);
                 auto newDatagram = QUIC::encodeDatagram(pendingPackets.front());
-                if (rand() % 10 < 8)
+                // if (rand() % 10 < 8)
                     this->socket.sendMsg(newDatagram);
                 connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
                 // UPDATE this connection's onFlight packet length;
