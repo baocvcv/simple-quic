@@ -14,13 +14,14 @@ namespace thquic::context {
 
 // TODO: some of these are changeable for flow control
 constexpr uint64_t MAX_CONNECTION_NUM = 1000;
-constexpr uint64_t MAX_STREAM_NUM = 32;
+constexpr uint64_t MAX_STREAM_NUM = 10;
 constexpr uint64_t MAX_PACKET_LENGTH = 1080; // SET maximum packet length to 1000 (Bytes?)
 constexpr uint64_t MAX_PACKET_DATA_LENGTH = 1024;
 constexpr uint64_t MAX_STREAM_OFFSET = 10240;
 constexpr uint64_t MAX_CONNECTION_SIZE = MAX_STREAM_NUM * MAX_STREAM_OFFSET;
+constexpr uint64_t MAX_BLOCKED_DELAY_LIMIT = 0;
 
-constexpr float FLOW_CONTROL_THRESH = 0.5;
+constexpr float FLOW_CONTROL_THRESH = 0.7;
 
 enum class StreamState {
     UNDEFINED,
@@ -200,7 +201,14 @@ class Stream {
             // utils::logger::warn("Current stream recv offset: %lu, current thresh: %lu",
             //     this->expOffset,
             //     uint64_t(max_recv_offset * FLOW_CONTROL_THRESH));
-            return this->expOffset >= max_recv_offset * FLOW_CONTROL_THRESH;
+            bool rt_val = this->expOffset >= max_recv_offset * FLOW_CONTROL_THRESH;
+            if (this->maxDelayedNum >= MAX_BLOCKED_DELAY_LIMIT && rt_val) {
+                this->maxDelayedNum = 0;
+            } else if (rt_val) {
+                rt_val = false;
+            }
+            return rt_val;
+            // return this->expOffset >= max_recv_offset * FLOW_CONTROL_THRESH;
         }
 
     private:
@@ -217,6 +225,8 @@ class Stream {
         std::vector<bool> bufferedFin;
         uint64_t max_recv_offset = 0;
         uint64_t max_send_offset = 0;
+        // Flow control related
+        uint64_t maxDelayedNum = 0;
 };
 
 class Connection {
@@ -916,12 +926,52 @@ class Connection {
             //     this->GetStreamByID(strmID).GetFlowControlParams().second,
             //     toSendBufLen);
             this->unsentBuf[0] = std::move(tmpBuf);
+
+            if (this->congestedByFlow >= 5) {
+                this->congestedByFlow = 0;
+                utils::logger::info("Create a StreamBlockedFrame with desired increase buffer lenght = {}", 
+                                    toSendBufLen + 32);
+                auto fr = std::make_shared<payload::StreamDataBlockedFrame>(strmID, toSendBufLen + 32);
+                uint64_t _usePktNum = this->GetNewPktNum();
+                // pktNumLen | dstConID | pktNum
+                uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
+                auto shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
+                                                        this->getRemoteConnectionID(), _usePktNum);
+                auto pl = std::make_shared<payload::Payload>();
+                pl->AttachFrame(fr);
+                auto pk = std::make_shared<payload::Packet>(shHdr, pl, this->GetSockaddrTo());
+                this->AddPacket(pk);
+                this->AddWhetherNeedACK(true);
+
+            } else {
+                this->congestedByFlow += 1;
+            }
             return nullptr;
         }
         if (!this->IsSendPermitted(toSendBufLen)) {
             //TODO: optionally create an STREAM_DATA_BLOCKED frame
             utils::logger::warn("Connection blocked!");
             this->unsentBuf[0] = std::move(tmpBuf);
+
+            if (this->congestedByFlow >= 5) {
+                this->congestedByFlow = 0;
+                utils::logger::info("Create a DataBlockFrame with desired increase buffer lenght = {}", 
+                                    toSendBufLen + 32);
+                auto fr = std::make_shared<payload::DataBlockedFrame>(toSendBufLen + 32);
+                uint64_t _usePktNum = this->GetNewPktNum();
+                // pktNumLen | dstConID | pktNum
+                uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
+                auto shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
+                                                        this->getRemoteConnectionID(), _usePktNum);
+                auto pl = std::make_shared<payload::Payload>();
+                pl->AttachFrame(fr);
+                auto pk = std::make_shared<payload::Packet>(shHdr, pl, this->GetSockaddrTo());
+                this->AddPacket(pk);
+                this->AddWhetherNeedACK(true);
+            } else {
+                this->congestedByFlow += 1;
+            }
+            
             return nullptr;
         }
 
@@ -1012,7 +1062,14 @@ class Connection {
             cur_size += e.second.GetRecvOffset();
         }
         // utils::logger::warn(msg, "Current connection recv offset: %lu", cur_size);
-        return cur_size >= max_recv_size * FLOW_CONTROL_THRESH;
+        bool rt_val = cur_size >= max_recv_size * FLOW_CONTROL_THRESH;
+        if (this->delayedRequestNum >= MAX_BLOCKED_DELAY_LIMIT && rt_val) {
+            this->delayedRequestNum = 0;
+        } else if (rt_val) {
+            rt_val = false;
+        }
+        return rt_val;
+        // return cur_size >= max_recv_size * FLOW_CONTROL_THRESH;
     }
 
     bool IsRecvPermitted(uint64_t bufLen) {
@@ -1033,6 +1090,14 @@ class Connection {
 
     bool ShouldIncStreamNumLimit() {
         return this->streamIDToStream.size() >= this->max_recv_stream_num * FLOW_CONTROL_THRESH;
+    }
+
+    void SetSentConnectionClosePkt(uint64_t _conClosePktNum) {
+        this->connectionClosePktNum = _conClosePktNum;
+    }
+
+    uint64_t GetConnectionClosePktNum() {
+        return this->connectionClosePktNum;
     }
 
    private:
@@ -1119,6 +1184,12 @@ class Connection {
     // Idle Timeout
     uint64_t idle_time; // the time that last received or sent a packet
     bool no_ack_elicity_packet_sent;
+
+    // ConnectionClose Pkt Num
+    uint64_t connectionClosePktNum;
+    // Flow control realted
+    uint64_t congestedByFlow = 0;
+    uint64_t delayedRequestNum = 0;
 };
 
 uint64_t Connection::connectionDescriptor = 0;

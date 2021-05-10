@@ -37,6 +37,7 @@ int QUIC::CloseConnection([[maybe_unused]] uint64_t descriptor,[[maybe_unused]] 
     // this->connections.erase(_it);
     this->connections[descriptor]->SetConnectionState(ConnectionState::WAIT_FOR_PEER_CLOSE);
     connection->SetWaitForPeerConCloseACKPktNum(_usePktNum);
+    this->connections[descriptor]->SetSentConnectionClosePkt(_usePktNum);
     utils::logger::warn("Deregister connection {}", descriptor);
     ConnectionIDGenerator generator = ConnectionIDGenerator::Get();
     generator.EraseConnectionID(connection->getLocalConnectionID());
@@ -359,7 +360,7 @@ int QUIC::SocketLoop() {
                 // if (_ackRecFrm != nullptr)
                 //     pendingPackets.front()->GetPktPayload()->AttachFrame(_ackRecFrm);
                 auto newDatagram = QUIC::encodeDatagram(pendingPackets.front());
-                // if (rand() % 10 < 8)
+                if (rand() % 10 < 8)
                     this->socket.sendMsg(newDatagram);
                 connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
                 // UPDATE this connection's onFlight packet length;
@@ -769,11 +770,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                         break;
                     }
                     // utils::logger::info("In Stream frame with the pkt number = {} not rec yet", _recPktNum);
-                    // ADD the received packet to need ACK packet list
-                    if (!haveAddedToACK) {
-                        foundCon->addNeedACKRecPkt(recPkt);
-                        haveAddedToACK = true;
-                    }
+                    
                     // utils::logger::info("In Stream frame with the pkt number = {} not rec yet 2", _recPktNum);
                     if (foundCon->IsStreamIDUsed(streamID) == false) {
                         //TODO: check if stream can be increased
@@ -822,6 +819,13 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                         this->CloseConnection(conSeq, "Flow control condition violated", TransportErrorCodes::FLOW_CONTROL_ERROR);
                         continue;
                     }
+
+                    // ADD the received packet to need ACK packet list
+                    if (!haveAddedToACK) {
+                        foundCon->addNeedACKRecPkt(recPkt);
+                        haveAddedToACK = true;
+                    }
+
                     if (_nowStream.WhetherTpUper(bufOffset)) {
                         this->streamDataReadyCallback(conSeq, streamID, std::move(buf), buflen, (bool)fin);
                         _nowStream.UpdateExpOffset(buflen);
@@ -1002,7 +1006,8 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 assert(foundCon != nullptr);
                 // utils::logger::warn("Wait for peer close pkt number = {}", 
                 //     foundCon->GetWaitForPeerConCloseACKPktNum());
-                if (foundCon->GetConnectionState() == ConnectionState::WAIT_FOR_PEER_CLOSE) {
+                if (foundCon->GetConnectionState() == ConnectionState::WAIT_FOR_PEER_CLOSE && 
+                    _recACKInS.Contain(foundCon->GetConnectionClosePktNum())) {
                     foundCon->SetConnectionState(ConnectionState::CLOSED);
                     utils::logger::info("Receive an ACK for Connection_CLOSE frame, transition to CLOSED state.");
                 }
@@ -1143,7 +1148,93 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                     // update idle timeout
                     foundCon->updateIdleTime(true); // no_ack_elicity_packet_sent = true
                 }
-            } 
+            } else if (frm->Type() == payload::FrameType::STREAM_DATA_BLOCKED) {
+                const ConnectionID& localConID = shHdr->GetDstID();
+                
+                std::shared_ptr<Connection> foundCon = nullptr;
+                // uint64_t conSeq;
+                for (auto con: this->connections) {
+                    if (con.second->GetConnectionState() != ConnectionState::CLOSED &&
+                        (con.second->getLocalConnectionID() == localConID)) {
+                        foundCon = con.second;
+                        // conSeq = con.first;
+                        break;
+                    }
+                }
+                if (foundCon == nullptr) {
+                    // utils::logger::info("Got an ACK frame for a closed or erased connection. Break.");
+                    break;
+                }
+                auto _maxDataFrm = std::dynamic_pointer_cast<payload::StreamDataBlockedFrame>(frm);
+                Stream& _strm = foundCon->GetStreamByID(_maxDataFrm->StreamID());
+                _strm.SetMaxRecvOffset(_strm.GetFlowControlParams().first + _maxDataFrm->GetMaximumStreamData());
+                utils::logger::warn("Got a STREAM_DATA_BLOCKED frame, requesting {} credits for stream {}.", 
+                                        _maxDataFrm->GetMaximumStreamData(), _maxDataFrm->StreamID());
+                // foundCon->SetMaxRecvSize(std::get<1>(foundCon->GetFlowControlParams()) + _maxDataFrm->GetMaximumStreamData());
+                // TODO: set max_recv_size for foundCon
+                if (!haveAddedToACK) {
+                    foundCon->addNeedACKRecPkt(recPkt);
+                    haveAddedToACK = true;
+                }
+                
+                auto fr = std::make_shared<payload::MaxStreamDataFrame>(_maxDataFrm->StreamID(), 
+                                                                        _strm.GetFlowControlParams().first);
+                uint64_t _usePktNum = foundCon->GetNewPktNum();
+                // pktNumLen | dstConID | pktNum
+                uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
+                auto shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
+                                                        foundCon->getRemoteConnectionID(), _usePktNum);
+                auto pl = std::make_shared<payload::Payload>();
+                pl->AttachFrame(fr);
+                auto pk = std::make_shared<payload::Packet>(shHdr, pl, foundCon->GetSockaddrTo());
+                // ADD pkt to this connection
+                foundCon->AddPacket(pk);
+                // ACTIVE end to close the stream --- need ack
+                foundCon->AddWhetherNeedACK(true);
+            } else if (frm->Type() == payload::FrameType::DATA_BLOCKED) {
+                const ConnectionID& localConID = shHdr->GetDstID();
+                
+                std::shared_ptr<Connection> foundCon = nullptr;
+                // uint64_t conSeq;
+                for (auto con: this->connections) {
+                    if (con.second->GetConnectionState() != ConnectionState::CLOSED &&
+                        (con.second->getLocalConnectionID() == localConID)) {
+                        foundCon = con.second;
+                        // conSeq = con.first;
+                        break;
+                    }
+                }
+                if (foundCon == nullptr) {
+                    // utils::logger::info("Got an ACK frame for a closed or erased connection. Break.");
+                    break;
+                }
+                auto _maxDataFrm = std::dynamic_pointer_cast<payload::DataBlockedFrame>(frm);
+                // Stream& _strm = foundCon->GetStreamByID(_maxDataFrm->StreamID());
+                // _strm.SetMaxRecvOffset(_strm.GetFlowControlParams().first + _maxDataFrm->GetMaximumStreamData());
+                utils::logger::error("Got a MAX_DATA frame, requesting {} credits.", 
+                                        _maxDataFrm->GetMaximumData());
+                foundCon->SetMaxRecvSize(std::get<1>(foundCon->GetFlowControlParams()) + _maxDataFrm->GetMaximumData());
+                // TODO: set max_recv_size for foundCon
+                if (!haveAddedToACK) {
+                    foundCon->addNeedACKRecPkt(recPkt);
+                    haveAddedToACK = true;
+                }
+                
+                auto fr = std::make_shared<payload::MaxDataFrame>(std::get<1>(foundCon->GetFlowControlParams()));
+                uint64_t _usePktNum = foundCon->GetNewPktNum();
+                // pktNumLen | dstConID | pktNum
+                uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
+                auto shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
+                                                        foundCon->getRemoteConnectionID(), _usePktNum);
+                auto pl = std::make_shared<payload::Payload>();
+                pl->AttachFrame(fr);
+                auto pk = std::make_shared<payload::Packet>(shHdr, pl, foundCon->GetSockaddrTo());
+                // ADD pkt to this connection
+                foundCon->AddPacket(pk);
+                // ACTIVE end to close the stream --- need ack
+                foundCon->AddWhetherNeedACK(true);
+            }
+
         }
         break;
     }
