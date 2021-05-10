@@ -36,6 +36,11 @@ int QUIC::CloseConnection([[maybe_unused]] uint64_t descriptor,[[maybe_unused]] 
     // auto _it = this->connections.find(descriptor);
     // this->connections.erase(_it);
     this->connections[descriptor]->SetConnectionState(ConnectionState::WAIT_FOR_PEER_CLOSE);
+    struct timeval curTime;
+    gettimeofday(&curTime, nullptr);
+    uint64_t current_time = curTime.tv_sec * 1000 + curTime.tv_usec / 1000;
+    utils::logger::info("Setting START_WAIT_FOR_PEER_CLOSE to {}.", current_time);
+    connection->SetStartWaitForPeer(current_time);
     connection->SetWaitForPeerConCloseACKPktNum(_usePktNum);
     this->connections[descriptor]->SetSentConnectionClosePkt(_usePktNum);
     utils::logger::warn("Deregister connection {}", descriptor);
@@ -216,6 +221,11 @@ int QUIC::SocketLoop() {
         // send packages
         uint64_t connection_descriptor = -1;
         for (auto& connection : this->connections) {
+            if (connection.second->GetConnectionState() == ConnectionState::WAIT_FOR_PEER_CLOSE 
+                && (current_time - connection.second->GetStartWaitForPeer() >= 2000)) {
+                utils::logger::error("Close the connection due to CONNECTION_CLOSE packet alarms.");
+                connection.second->SetConnectionState(ConnectionState::CLOSED);
+            }
             connection_descriptor++;
             // utils::logger::info("Now going to print the sent but not acked packets and rec but not acked packets");
             bool streamValid = connection.second->checkValidStream();
@@ -360,7 +370,7 @@ int QUIC::SocketLoop() {
                 // if (_ackRecFrm != nullptr)
                 //     pendingPackets.front()->GetPktPayload()->AttachFrame(_ackRecFrm);
                 auto newDatagram = QUIC::encodeDatagram(pendingPackets.front());
-                if (rand() % 10 < 8)
+                // if (rand() % 10 < 8)
                     this->socket.sendMsg(newDatagram);
                 connection.second->RemoveToSendPktNum(pendingPackets.front()->GetPktNum());
                 // UPDATE this connection's onFlight packet length;
@@ -431,7 +441,7 @@ int QUIC::SocketLoop() {
             std::shared_ptr<payload::Packet> mustACKPkt = connection.second->GetSpeACKPacketForRecPkt();
             if (mustACKPkt != nullptr) {
                 auto newDatagram = QUIC::encodeDatagram(mustACKPkt);
-                if (rand() % 10 < 8)
+                // if (rand() % 10 < 8)
                     this->socket.sendMsg(newDatagram);
             }
 
@@ -741,7 +751,7 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 //     utils::logger::info("[check connection count]::localConID = {}, con.second.conID = {}, connectionState = {}",localConID.ToString(),con.second->getLocalConnectionID().ToString(),con.second->GetConnectionState());                    
                 // }
                 for (auto con: this->connections) {
-                    utils::logger::info("localConID = {}, con.second.conID = {}, connectionState = {}",localConID.ToString(),con.second->getLocalConnectionID().ToString(),con.second->GetConnectionState());                    
+                    // utils::logger::info("localConID = {}, con.second.conID = {}, connectionState = {}",localConID.ToString(),con.second->getLocalConnectionID().ToString(),con.second->GetConnectionState());                    
                     if(con.second->getLocalConnectionID() == localConID) {
                         if(con.second->GetConnectionState() == ConnectionState::WAIT_FOR_PEER_CLOSE || 
                            con.second->GetConnectionState() == ConnectionState::CLOSED) {

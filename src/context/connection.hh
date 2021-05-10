@@ -1100,6 +1100,14 @@ class Connection {
         return this->connectionClosePktNum;
     }
 
+    void SetStartWaitForPeer(uint64_t _sswp) {
+        this->startWaitForPeer = _sswp;
+    }
+
+    uint64_t GetStartWaitForPeer() {
+        return this->startWaitForPeer;
+    }
+
    private:
     
     static std::map<uint64_t, bool> connectionDescriptorToState;
@@ -1187,6 +1195,7 @@ class Connection {
 
     // ConnectionClose Pkt Num
     uint64_t connectionClosePktNum;
+    uint64_t startWaitForPeer;
     // Flow control realted
     uint64_t congestedByFlow = 0;
     uint64_t delayedRequestNum = 0;
