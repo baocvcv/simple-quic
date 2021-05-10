@@ -699,6 +699,28 @@ class Connection {
         return this->whetherNeedACK.front();
     }
 
+    bool GetPendingPackageFrontIsPing() {
+        if(this->pendingPackets.empty()) {
+            return false;
+        }
+        else {
+            std::shared_ptr<payload::Packet> front_package = this->pendingPackets.front();
+            std::list<std::shared_ptr<payload::Frame>> frames = front_package->GetPktPayload()->GetFrames();
+            if(frames.empty()){
+                return false;
+            }
+            else {
+                std::shared_ptr<payload::Frame> front_frame = frames.front();
+                if(front_frame->Name() == "PING") {
+                    return true;
+                }
+                else {
+                    return false;
+                }
+            }
+        }
+    }
+
     void PopWhetherNeedACK() {
         this->whetherNeedACK.pop_front();
     }

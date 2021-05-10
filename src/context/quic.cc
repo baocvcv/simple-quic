@@ -265,24 +265,30 @@ int QUIC::SocketLoop() {
                         if(connection.second->GetConnectionState() != ConnectionState::CREATED &&
                             connection.second->GetConnectionState() != ConnectionState::CLOSED) {
                             utils::logger::info("idle timeout and need to defer, connection.second.state = {}",connection.second->GetConnectionState());                
-                            // send a Ping Frame
-                            uint64_t _usePktNum = connection.second->GetNewPktNum();
-                            utils::logger::info("Sending ping frame packet with packet numbeer = {}, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
-                            uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
-                            // pktNumLen | dstConID | pktNum
-                            std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
-                                                                        connection.second->getRemoteConnectionID(), _usePktNum);
-                            utils::ByteStream emptyBys(nullptr, 0);
-                            std::shared_ptr<payload::Payload> pld = std::make_shared<payload::Payload>(emptyBys, 0);
-                            std::shared_ptr<payload::PingFrame> pingFrm = std::make_shared<payload::PingFrame>();
-                            pld->AttachFrame(pingFrm);
-                            std::shared_ptr<payload::Packet> pk = std::make_shared<payload::Packet>(shHdr, pld, connection.second->GetSockaddrTo());
-                            // auto newDatagram = QUIC::encodeDatagram(pk);
-                            // this->socket.sendMsg(newDatagram);
-                            // connection.second->UpdateOnFlightBySentPktLen(pk->EncodeLen());
-                            connection.second->AddPacket_to_front(pk);
-                            connection.second->AddWhetherNeedACK_to_front(true);
-                            connection.second->updateIdleTime(false);
+                            
+                            if(!connection.second->GetPendingPackageFrontIsPing()) {
+                                // send a Ping Frame
+                                uint64_t _usePktNum = connection.second->GetNewPktNum();
+                                utils::logger::info("Sending ping frame packet with packet numbeer = {}, DstID = {}",_usePktNum,connection.second->getRemoteConnectionID().ToString());
+                                uint64_t _pktNumLen = utils::encodeVarIntLen(_usePktNum);
+                                // pktNumLen | dstConID | pktNum
+                                std::shared_ptr<payload::ShortHeader> shHdr = std::make_shared<payload::ShortHeader>(_pktNumLen, 
+                                                                            connection.second->getRemoteConnectionID(), _usePktNum);
+                                utils::ByteStream emptyBys(nullptr, 0);
+                                std::shared_ptr<payload::Payload> pld = std::make_shared<payload::Payload>(emptyBys, 0);
+                                std::shared_ptr<payload::PingFrame> pingFrm = std::make_shared<payload::PingFrame>();
+                                pld->AttachFrame(pingFrm);
+                                std::shared_ptr<payload::Packet> pk = std::make_shared<payload::Packet>(shHdr, pld, connection.second->GetSockaddrTo());
+                                // auto newDatagram = QUIC::encodeDatagram(pk);
+                                // this->socket.sendMsg(newDatagram);
+                                // connection.second->UpdateOnFlightBySentPktLen(pk->EncodeLen());
+                                connection.second->AddPacket_to_front(pk);
+                                connection.second->AddWhetherNeedACK_to_front(true);
+                                connection.second->updateIdleTime(false);  
+                            }
+                            else {
+                                utils::logger::info("Already a PING package at front");
+                            }
                         }
                     }
                     else {
