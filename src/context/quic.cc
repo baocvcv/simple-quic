@@ -101,7 +101,8 @@ uint64_t QUICClient::CreateConnection([[maybe_unused]] struct sockaddr_in& addrT
 uint64_t QUIC::CreateStream([[maybe_unused]] uint64_t descriptor, [[maybe_unused]] bool bidirectional) {
     std::shared_ptr<Connection> streamConnection = this->connections[descriptor];
     uint64_t newStreamID = streamConnection->GenerateStreamID(type, bidirectional);
-    streamConnection->SetStreamFeature(newStreamID, bidirectional);
+    if (newStreamID >= 0)
+        streamConnection->SetStreamFeature(newStreamID, bidirectional);
     return newStreamID;
     // return 0;
 }
@@ -868,8 +869,8 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
 
                     if (_nowStream.ShouldIncRecvLimit()) {
                         //TODO: check if stream size should
-                        utils::logger::warn("Increasing stream offset limit");
                         uint64_t cur_limit = _nowStream.GetFlowControlParams().first;
+                        utils::logger::warn("Increasing stream offset limit from {} to {}", cur_limit, int(cur_limit * 1.414));
                         auto fr = std::make_shared<payload::MaxStreamDataFrame>(streamID, cur_limit * 1.414);
                         uint64_t _usePktNum = foundCon->GetNewPktNum();
                         // pktNumLen | dstConID | pktNum
@@ -886,8 +887,8 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                         _nowStream.SetMaxRecvOffset(fr->GetMaximumStreamData());
                     }
                     if (foundCon->ShouldIncRecvLimit()) {
-                        utils::logger::warn("Increasing connection offset limit");
                         uint64_t cur_limit = std::get<1>(foundCon->GetFlowControlParams());
+                        utils::logger::warn("Increasing connection offset limit from {} to {}", cur_limit, cur_limit * 1.414);
                         auto fr = std::make_shared<payload::MaxDataFrame>(cur_limit * 1.414);
                         uint64_t _usePktNum = foundCon->GetNewPktNum();
                         // pktNumLen | dstConID | pktNum
@@ -1044,7 +1045,6 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 // update idle timeout
                 foundCon->updateIdleTime(true); // no_ack_elicity_packet_sent = true
             } else if (frm->Type() == payload::FrameType::MAX_DATA) {
-                utils::logger::info("Received MAX_DATA frame");
                 const ConnectionID& localConID = shHdr->GetDstID();
                 
                 std::shared_ptr<Connection> foundCon = nullptr;
@@ -1063,12 +1063,12 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 }
                 auto _maxDataFrm = std::dynamic_pointer_cast<payload::MaxDataFrame>(frm);
                 foundCon->SetMaxSendSize(_maxDataFrm->GetMaximumData());
+                utils::logger::info("Received MAX_DATA frame with MaximumData={}", _maxDataFrm->GetMaximumData());
                 if (!haveAddedToACK) {
                     foundCon->addNeedACKRecPkt(recPkt);
                     haveAddedToACK = true;
                 }
             } else if (frm->Type() == payload::FrameType::MAX_STREAM_DATA) {
-                utils::logger::info("Received MAX_STREAM_DATA frame");
                 const ConnectionID& localConID = shHdr->GetDstID();
                 
                 std::shared_ptr<Connection> foundCon = nullptr;
@@ -1087,6 +1087,8 @@ int QUIC::incomingMsg([[maybe_unused]] std::unique_ptr<utils::UDPDatagram> datag
                 }
                 auto _maxDataFrm = std::dynamic_pointer_cast<payload::MaxStreamDataFrame>(frm);
                 foundCon->SetStreamMaxSendOffset(_maxDataFrm->StreamID(), _maxDataFrm->GetMaximumStreamData());
+                utils::logger::info("Received MAX_STREAM_DATA frame increasing stream {} limit to {}",
+                    _maxDataFrm->StreamID(), _maxDataFrm->GetMaximumStreamData());
                 if (!haveAddedToACK) {
                     foundCon->addNeedACKRecPkt(recPkt);
                     haveAddedToACK = true;

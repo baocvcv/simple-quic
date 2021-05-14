@@ -1,4 +1,4 @@
-prefix=/home/meow/_2021_spring/NT/quic/extern/spdlog/install
+prefix=/home/fred/Codes/quic/extern/spdlog/install
 exec_prefix=${prefix}
 includedir=${prefix}/include
 libdir=${exec_prefix}/lib

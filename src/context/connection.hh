@@ -286,16 +286,17 @@ class Connection {
                 streamID |= 0x2;
             uint64_t type = streamID; 
 
-            auto insertRes = usedStreamID[type].insert(i);
+            auto id = ((i<<2)&0xFFFFFFFFFFFFFFFC)|type;
+            auto insertRes = usedStreamID[type].insert(id);
             if (insertRes.second) {
-                this->streamState[i] = StreamState::RUNNING;
-                this->streamIDToStream[i] = Stream(i, StreamState::RUNNING);
-                this->streamIDToStream[i].SetMaxRecvOffset(this->max_recv_stream_offset);
-                this->streamIDToStream[i].SetMaxSendOffset(this->max_send_stream_offset);
-                return (((i<<2)&0xFFFFFFFFFFFFFFFC)|type);
+                this->streamState[id] = StreamState::RUNNING;
+                this->streamIDToStream[id] = Stream(i, StreamState::RUNNING);
+                this->streamIDToStream[id].SetMaxRecvOffset(this->max_recv_stream_offset);
+                this->streamIDToStream[id].SetMaxSendOffset(this->max_send_stream_offset);
+                return id;
             }
         }
-        throw std::runtime_error("Stream id for ths connection exhausted");
+        return -1;
     }
 
     void SetStreamFeature(uint64_t streamID, bool bidirectional) {
@@ -365,7 +366,7 @@ class Connection {
     // to the socket and add ACK frame in the payload
     // StreamReadyCallback: add the new stream to self stream and send an INITIAL package
     int InsertStream(uint64_t streamID, bool bidirectional) {
-        if (streamID >= this->max_send_stream_num) {
+        if ((streamID >> 2) >= this->max_send_stream_num) {
             return -1;
         }
         auto insertRes = this->usedStreamID[streamID&0x3].insert((streamID>>2)&0x3FFFFFFFFFFFFFFF);
@@ -943,15 +944,15 @@ class Connection {
         if (!this->GetStreamByID(strmID).IsSendPermitted(toSendBufLen)) {
             //TODO: optionally create an STREAM_DATA_BLOCKED frame
             utils::logger::warn("Stream blocked!");
-            // utils::logger::info(msg, "Current send offset: %lu, current limit: %lu, trying to send: %lu",
-            //     this->GetStreamByID(strmID).GetSendOffset(),
-            //     this->GetStreamByID(strmID).GetFlowControlParams().second,
-            //     toSendBufLen);
+            utils::logger::info("Current send offset: {}, current limit: {}, trying to send: {}",
+                this->GetStreamByID(strmID).GetSendOffset(),
+                this->GetStreamByID(strmID).GetFlowControlParams().second,
+                toSendBufLen);
             this->unsentBuf[0] = std::move(tmpBuf);
 
             if (this->congestedByFlow >= 5) {
                 this->congestedByFlow = 0;
-                utils::logger::info("Create a StreamBlockedFrame with desired increase buffer lenght = {}", 
+                utils::logger::info("Create a StreamBlockedFrame with desired increase buffer length = {}", 
                                     toSendBufLen + 32);
                 auto fr = std::make_shared<payload::StreamDataBlockedFrame>(strmID, toSendBufLen + 32);
                 uint64_t _usePktNum = this->GetNewPktNum();
@@ -1111,7 +1112,7 @@ class Connection {
     }
 
     bool ShouldIncStreamNumLimit() {
-        return this->streamIDToStream.size() >= this->max_recv_stream_num * FLOW_CONTROL_THRESH;
+        return this->streamIDToStream.size() >= this->max_recv_stream_num * 0.1;
     }
 
     void SetSentConnectionClosePkt(uint64_t _conClosePktNum) {
