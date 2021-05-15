@@ -286,17 +286,16 @@ class Connection {
                 streamID |= 0x2;
             uint64_t type = streamID; 
 
-            auto id = ((i<<2)&0xFFFFFFFFFFFFFFFC)|type;
-            auto insertRes = usedStreamID[type].insert(id);
+            auto insertRes = usedStreamID[type].insert(i);
             if (insertRes.second) {
-                this->streamState[id] = StreamState::RUNNING;
-                this->streamIDToStream[id] = Stream(i, StreamState::RUNNING);
-                this->streamIDToStream[id].SetMaxRecvOffset(this->max_recv_stream_offset);
-                this->streamIDToStream[id].SetMaxSendOffset(this->max_send_stream_offset);
-                return id;
+                this->streamState[i] = StreamState::RUNNING;
+                this->streamIDToStream[i] = Stream(i, StreamState::RUNNING);
+                this->streamIDToStream[i].SetMaxRecvOffset(this->max_recv_stream_offset);
+                this->streamIDToStream[i].SetMaxSendOffset(this->max_send_stream_offset);
+                return (((i<<2)&0xFFFFFFFFFFFFFFFC)|type);
             }
         }
-        return -1;
+        throw std::runtime_error("Stream id for ths connection exhausted");
     }
 
     void SetStreamFeature(uint64_t streamID, bool bidirectional) {
@@ -366,7 +365,7 @@ class Connection {
     // to the socket and add ACK frame in the payload
     // StreamReadyCallback: add the new stream to self stream and send an INITIAL package
     int InsertStream(uint64_t streamID, bool bidirectional) {
-        if ((streamID >> 2) >= this->max_send_stream_num) {
+        if (streamID >= this->max_send_stream_num) {
             return -1;
         }
         auto insertRes = this->usedStreamID[streamID&0x3].insert((streamID>>2)&0x3FFFFFFFFFFFFFFF);
@@ -1112,7 +1111,7 @@ class Connection {
     }
 
     bool ShouldIncStreamNumLimit() {
-        return this->streamIDToStream.size() >= this->max_recv_stream_num * 0.1;
+        return this->streamIDToStream.size() >= this->max_recv_stream_num * FLOW_CONTROL_THRESH; 
     }
 
     void SetSentConnectionClosePkt(uint64_t _conClosePktNum) {

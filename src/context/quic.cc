@@ -101,8 +101,7 @@ uint64_t QUICClient::CreateConnection([[maybe_unused]] struct sockaddr_in& addrT
 uint64_t QUIC::CreateStream([[maybe_unused]] uint64_t descriptor, [[maybe_unused]] bool bidirectional) {
     std::shared_ptr<Connection> streamConnection = this->connections[descriptor];
     uint64_t newStreamID = streamConnection->GenerateStreamID(type, bidirectional);
-    if (newStreamID >= 0)
-        streamConnection->SetStreamFeature(newStreamID, bidirectional);
+    streamConnection->SetStreamFeature(newStreamID, bidirectional);
     return newStreamID;
     // return 0;
 }
