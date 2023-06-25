@@ -1,5 +1,7 @@
 # THQUIC Project
 
+Simple QUIC implementation for the Advanced Networking course.
+
 # Prerequisite
 
 * Cmake > 3.15
